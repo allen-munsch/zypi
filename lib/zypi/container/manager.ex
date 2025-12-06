@@ -12,7 +12,7 @@ defmodule Zypi.Container.Manager do
 
   @output_buffer_size 1000
 
-  defstruct outputs: %{}, subscribers: %{}, vm_states: %{}, buffer: ""
+  defstruct outputs: %{}, subscribers: %{}, vm_states: %{}, port_to_container: %{}
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -44,7 +44,8 @@ defmodule Zypi.Container.Manager do
       {:ok, vm_state} ->
         state = %{state |
           outputs: Map.put(state.outputs, id, []),
-          vm_states: Map.put(state.vm_states, id, vm_state)
+          vm_states: Map.put(state.vm_states, id, vm_state),
+          port_to_container: Map.put(state.port_to_container, vm_state.fc_port, id)
         }
         {:reply, {:ok, id}, state}
       error ->
@@ -64,10 +65,19 @@ defmodule Zypi.Container.Manager do
   def handle_call({:destroy, id}, _from, state) do
     vm_state = Map.get(state.vm_states, id)
     result = do_destroy(id, vm_state)
+    
+    # Clean up port mapping
+    port_to_container = if vm_state && vm_state.fc_port do
+      Map.delete(state.port_to_container, vm_state.fc_port)
+    else
+      state.port_to_container
+    end
+    
     state = %{state |
       outputs: Map.delete(state.outputs, id),
       subscribers: Map.delete(state.subscribers, id),
-      vm_states: Map.delete(state.vm_states, id)
+      vm_states: Map.delete(state.vm_states, id),
+      port_to_container: port_to_container
     }
     {:reply, result, state}
   end
@@ -115,17 +125,43 @@ defmodule Zypi.Container.Manager do
   end
 
   @impl true
-  def handle_info({port, {:data, data}}, %{buffer: buffer} = state) when is_port(port) do
-    # 'data' is already a string/binary
-    new_buffer = buffer <> data
+  def handle_info({port, {:exit_status, status}}, state) when is_port(port) do
+    case Map.get(state.port_to_container, port) do
+      nil ->
+        Logger.debug("Unknown port exited with status #{status}")
+        {:noreply, state}
+      
+      container_id ->
+        Logger.info("VM #{container_id} port exited with status #{status}")
+        Containers.update(container_id, %{status: :exited})
+        
+        # Notify Console and subscribers
+        exit_msg = "\r\n[VM exited with status #{status}]\r\n"
+        Zypi.Container.Console.forward_output(container_id, exit_msg)
+        broadcast_output(state, container_id, exit_msg)
+        
+        # Clean up port mapping
+        state = %{state | port_to_container: Map.delete(state.port_to_container, port)}
+        {:noreply, state}
+    end
+  end
 
-    {lines, remainder} = split_lines(new_buffer)
-
-    Enum.each(lines, fn line ->
-      Logger.debug("Manager received line: #{line}")
-    end)
-
-    {:noreply, %{state | buffer: remainder}}
+  @impl true
+  def handle_info({port, {:data, data}}, state) when is_port(port) do
+    case Map.get(state.port_to_container, port) do
+      nil ->
+        Logger.debug("Manager received data from unknown port: #{byte_size(data)} bytes")
+        {:noreply, state}
+      
+      container_id ->
+        # Forward to Console GenServer for this container
+        Zypi.Container.Console.forward_output(container_id, data)
+        
+        # Also maintain local buffer for logs API and subscribers
+        state = buffer_output(state, container_id, data)
+        broadcast_output(state, container_id, data)
+        {:noreply, state}
+    end
   end
 
   # Catch-all for other messages, if you want

@@ -53,6 +53,21 @@ defmodule Zypi.Container.Console do
   end
 
   @doc """
+  Forward output from the VM to connected clients.
+  Called by Manager which owns the Firecracker port.
+  """
+  def forward_output(vm_id, data) do
+    case GenServer.whereis(via_tuple(vm_id)) do
+      nil -> 
+        # Console not running yet, data will be lost
+        # This is fine during early boot before console starts
+        :ok
+      _pid -> 
+        GenServer.cast(via_tuple(vm_id), {:vm_output_from_manager, data})
+    end
+  end
+
+  @doc """
   Stops the console GenServer.
   """
   def stop(vm_id) do
@@ -110,8 +125,8 @@ defmodule Zypi.Container.Console do
   end
 
   @impl true
-  def handle_info({:vm_output, data}, state) do
-    # Append to buffer (keep last 64KB)
+  def handle_cast({:vm_output_from_manager, data}, state) do
+    # Append to buffer (keep last 64KB for more history)
     new_buffer = state.buffer <> data
     buffer = if byte_size(new_buffer) > 65_536 do
       binary_part(new_buffer, byte_size(new_buffer) - 65_536, 65_536)
@@ -123,7 +138,7 @@ defmodule Zypi.Container.Console do
     for client <- state.clients do
       send(client, {:console_output, data})
     end
-
+    
     {:noreply, %{state | buffer: buffer}}
   end
 
