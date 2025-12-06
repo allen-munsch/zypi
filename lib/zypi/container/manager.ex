@@ -23,6 +23,61 @@ defmodule Zypi.Container.Manager do
   def get(container_id), do: Containers.get(container_id)
   def list, do: Containers.list()
 
+  @doc """
+  Get shell connection info for a container.
+  Returns SSH details if available, otherwise console fallback.
+  """
+  def get_shell_info(container_id) do
+    case Containers.get(container_id) do
+      {:ok, container} ->
+        case container.status do
+          :running ->
+            ssh_info = check_ssh_availability(container)
+            
+            {:ok, %{
+              container_id: container_id,
+              ip: format_ip(container.ip),
+              mode: ssh_info.mode,
+              ssh_available: ssh_info.available,
+              ssh_key_path: ssh_info.key_path,
+              ssh_user: "root",
+              ssh_port: 22,
+              console_port: Zypi.API.ConsoleSocket.get_port()
+            }}
+            
+          status ->
+            {:error, {:not_running, status}}
+        end
+        
+      {:error, :not_found} = error ->
+        error
+    end
+  end
+
+  defp check_ssh_availability(container) do
+    ssh_key = Application.get_env(:zypi, :ssh_key_path)
+    ip = format_ip(container.ip)
+    
+    # Check if SSH port is reachable
+    ssh_reachable = case :gen_tcp.connect(String.to_charlist(ip), 22, [], 500) do
+      {:ok, socket} ->
+        :gen_tcp.close(socket)
+        true
+      {:error, _} ->
+        false
+    end
+    
+    cond do
+      ssh_key && ssh_reachable ->
+        %{mode: "ssh", available: true, key_path: ssh_key}
+      true ->
+        %{mode: "console", available: false, key_path: nil}
+    end
+  end
+
+  defp format_ip({a, b, c, d}), do: "#{a}.#{b}.#{c}.#{d}"
+  defp format_ip(ip) when is_binary(ip), do: ip
+
   def get_output(container_id), do: GenServer.call(__MODULE__, {:get_output, container_id})
   def subscribe(container_id), do: GenServer.call(__MODULE__, {:subscribe, container_id, self()})
   def unsubscribe(container_id), do: GenServer.cast(__MODULE__, {:unsubscribe, container_id, self()})
@@ -355,4 +410,6 @@ defmodule Zypi.Container.Manager do
   end
 
   defp generate_id, do: "ctr_" <> (:crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower))
+
+
 end

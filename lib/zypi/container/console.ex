@@ -44,6 +44,21 @@ defmodule Zypi.Container.Console do
   end
 
   @doc """
+  Get a fresh shell prompt in the VM console.
+  The shell is always running - just send newline to get prompt.
+  """
+  def spawn_shell(vm_id) do
+    case exists?(vm_id) do
+      true ->
+        # Send a couple newlines to get a fresh prompt
+        send_input(vm_id, "\n\n")
+        :ok
+      false ->
+        {:error, :console_not_found}
+    end
+  end
+
+  @doc """
   Retrieves the buffered output for a VM.
   """
   def get_output(vm_id) do
@@ -77,6 +92,14 @@ defmodule Zypi.Container.Console do
     end
   catch
     :exit, _ -> :ok
+  end
+
+  @doc """
+  Clear the console buffer.
+  Useful when starting a shell session to not show boot history.
+  """
+  def clear_buffer(vm_id) do
+    GenServer.cast(via_tuple(vm_id), :clear_buffer)
   end
 
   # Internal function to get the GenServer name
@@ -140,6 +163,11 @@ defmodule Zypi.Container.Console do
     end
     
     {:noreply, %{state | buffer: buffer}}
+  end
+
+  @impl true
+  def handle_cast(:clear_buffer, state) do
+    {:noreply, %{state | buffer: ""}}
   end
 
   @impl true

@@ -150,6 +150,51 @@ defmodule Zypi.API.Router do
     end
   end
 
+  get "/containers/:id/shell_info" do
+    case Manager.get_shell_info(id) do
+      {:ok, info} ->
+        send_json(conn, 200, info)
+        
+      {:error, :not_found} ->
+        send_json(conn, 404, %{error: "not_found"})
+        
+      {:error, {:not_running, status}} ->
+        send_json(conn, 400, %{
+          error: "container_not_running",
+          status: to_string(status),
+          message: "Container must be running to access shell"
+        })
+    end
+  end
+
+  post "/containers/:id/shell/spawn" do
+    case Containers.get(id) do
+      {:ok, %{status: :running}} ->
+        case Zypi.Container.Console.spawn_shell(id) do
+          :ok ->
+            send_json(conn, 200, %{status: "shell_spawned", console_port: ConsoleSocket.get_port()})
+          {:error, reason} ->
+            send_json(conn, 500, %{error: inspect(reason)})
+        end
+        
+      {:ok, %{status: status}} ->
+        send_json(conn, 400, %{error: "container_not_running", status: to_string(status)})
+        
+      {:error, :not_found} ->
+        send_json(conn, 404, %{error: "not_found"})
+    end
+  end
+
+  post "/containers/:id/console/clear" do
+    case Zypi.Container.Console.exists?(id) do
+      true ->
+        Zypi.Container.Console.clear_buffer(id)
+        send_json(conn, 200, %{status: "buffer_cleared"})
+      false ->
+        send_json(conn, 404, %{error: "console_not_found"})
+    end
+  end
+
   post "/containers" do
     Logger.info("API: POST /containers - #{inspect(conn.body_params)}")
     params = %{

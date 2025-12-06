@@ -228,16 +228,49 @@ defmodule Zypi.Pool.DevicePool do
     env = config[:env] || config["env"] || []
     workdir = config[:workdir] || config["workdir"] || "/"
 
-    exec_cmd = case {entrypoint, cmd} do
-      {[], []} -> "exec /bin/sh"
-      {[], c} -> "exec #{shell_escape(c)}"
-      {e, []} -> "exec #{shell_escape(e)}"
-      {e, c} -> "exec #{shell_escape(e ++ c)}"
+    # Build the main process command
+    main_cmd = case {entrypoint, cmd} do
+      {[], []} -> nil  # No main process, just shell
+      {[], c} -> shell_escape(c)
+      {e, []} -> shell_escape(e)
+      {e, c} -> shell_escape(e ++ c)
+    end
+
+    # Build environment exports
+    env_exports = env
+      |> Enum.map(&"export #{&1}")
+      |> Enum.join("\n")
+
+    # If there's a main process, run it in background and keep shell in foreground
+    # If no main process, just start interactive shell
+    main_process_section = if main_cmd do
+      """
+      # Start main container process in background
+      echo "Starting main process: #{main_cmd}"
+      cd #{workdir}
+      (#{main_cmd}) &
+      MAIN_PID=$!
+      echo "Main process started with PID $MAIN_PID"
+      
+      # Trap to forward signals to main process
+      trap "kill $MAIN_PID 2>/dev/null" EXIT TERM INT
+      """
+    else
+      """
+      # No main process defined
+      cd #{workdir}
+      """
     end
 
     """
     #!/bin/sh
+    
+    # Zypi container init script
+    # Mounts filesystems, starts main process, provides console shell
+    
     set -e
+    
+    # Mount essential filesystems
     mount -t proc proc /proc 2>/dev/null || true
     mount -t sysfs sysfs /sys 2>/dev/null || true
     mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
@@ -245,12 +278,32 @@ defmodule Zypi.Pool.DevicePool do
     mount -t devpts devpts /dev/pts 2>/dev/null || true
     mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
     mount -t tmpfs tmpfs /run 2>/dev/null || true
+    mount -t tmpfs tmpfs /tmp 2>/dev/null || true
+    mkdir -p /run/sshd
+    
+    # Configure networking
     ip link set lo up 2>/dev/null || true
     ip link set eth0 up 2>/dev/null || true
+    
+    # Set environment
     export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-    #{Enum.map(env, &"export #{&1}") |> Enum.join("\n")}
+    export HOME=/root
+    export TERM=linux
+    #{env_exports}
+    
+    #{main_process_section}
+    
+    # Start interactive shell on console
+    # This allows `zypi shell` to work
+    echo ""
+    echo "=========================================="
+    echo "Zypi Container Console"
+    echo "Type 'exit' to stop the container"
+    echo "=========================================="
+    echo ""
+    
     cd #{workdir}
-    #{exec_cmd}
+    exec /bin/sh
     """
   end
 
