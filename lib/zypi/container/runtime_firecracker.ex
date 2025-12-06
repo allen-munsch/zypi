@@ -23,6 +23,7 @@ defmodule Zypi.Container.RuntimeFirecracker do
     socket_path = Path.join(vm_path, "api.sock")
     File.rm(socket_path)
 
+
     with {:ok, tap} <- setup_tap(container.id, container.ip),
          {:ok, fc_port} <- spawn_firecracker(socket_path),
          :ok <- wait_for_socket(socket_path),

@@ -22,6 +22,7 @@ docker compose up
 source tools/zypi-cli.sh
 ./build_push_start.sh
 
+# There are 2 examples that run, base alpine, and a base alpine python
 # 3.5 seconds later
 # The demo ( hello-zypi ) project has been built, pushed, created, started, booted, and is running
 
@@ -82,10 +83,10 @@ zypi-node  |
 Helper cli:
 
 ```
-source ./tools/zypi-cli.sh
+05:06:40 jm@pop-os zypi ±|main ✗|→ source ./tools/zypi-cli.sh
 Zypi CLI loaded. Type 'zypi' for help.
 
-zypi
+05:06:40 jm@pop-os zypi ±|main ✗|→ zypi
 
 Zypi CLI - Firecracker Container Runtime
 
@@ -106,6 +107,69 @@ Inspection:
   inspect <id>         Container details
   logs <id>            Container logs [todo]
   attach <id>          Attach to output stream [todo]
+
+05:06:37 jm@pop-os zypi ±|main ✗|→ zypi images
+{
+  "images": [
+    "hello-zippy:v22",
+    "hello-zippy:v4",
+    "hello-zippy:v2",
+    "hello-zippy:v3",
+    "hello-zippy:v21"
+  ]
+}
+
+05:06:40 jm@pop-os zypi ±|main ✗|→ zypi list
+{
+  "containers": [
+    {
+      "id": "test21",
+      "status": "created",
+      "ip": "10.0.0.6",
+      "started_at": null,
+      "image": "hello-zippy:v21",
+      "created_at": "2025-12-06T11:05:30.575573Z",
+      "rootfs": "/var/lib/zypi/containers/test21/rootfs.ext4"
+    },
+    {
+      "id": "test3",
+      "status": "running",
+      "ip": "10.0.0.4",
+      "started_at": "2025-12-06T11:05:26.123145Z",
+      "image": "hello-zippy:v3",
+      "created_at": "2025-12-06T11:05:25.907863Z",
+      "rootfs": "/var/lib/zypi/containers/test3/rootfs.ext4"
+    },
+    {
+      "id": "test22",
+      "status": "running",
+      "ip": "10.0.0.7",
+      "started_at": "2025-12-06T11:05:33.036854Z",
+      "image": "hello-zippy:v22",
+      "created_at": "2025-12-06T11:05:32.845566Z",
+      "rootfs": "/var/lib/zypi/containers/test22/rootfs.ext4"
+    },
+    {
+      "id": "test4",
+      "status": "running",
+      "ip": "10.0.0.5",
+      "started_at": "2025-12-06T11:05:28.461920Z",
+      "image": "hello-zippy:v4",
+      "created_at": "2025-12-06T11:05:28.256263Z",
+      "rootfs": "/var/lib/zypi/containers/test4/rootfs.ext4"
+    },
+    {
+      "id": "test2",
+      "status": "running",
+      "ip": "10.0.0.3",
+      "started_at": "2025-12-06T11:05:20.876954Z",
+      "image": "hello-zippy:v2",
+      "created_at": "2025-12-06T11:05:20.668811Z",
+      "rootfs": "/var/lib/zypi/containers/test2/rootfs.ext4"
+    }
+  ]
+}
+
 
 ```
 

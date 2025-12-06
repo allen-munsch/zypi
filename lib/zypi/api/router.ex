@@ -77,7 +77,7 @@ defmodule Zypi.API.Router do
       # Try to read the body
       try do
         # Read with a reasonable limit, adjust as needed
-        max_length = 50_000_000  # 50MB limit
+        max_length = 100_000_000 # 100MB limit
         {:ok, body, conn} = Plug.Conn.read_body(conn, length: max_length)
 
         Logger.info("Successfully read body. Body size: #{byte_size(body)} bytes")
