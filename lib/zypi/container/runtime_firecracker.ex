@@ -259,19 +259,17 @@ defmodule Zypi.Container.RuntimeFirecracker do
 
   defp setup_tap(container_id, ip) do
     tap_name = "ztap#{:erlang.phash2(container_id, 9999)}"
-    {a, b, c, _d} = ip
-    gateway = "#{a}.#{b}.#{c}.1"
-
+    bridge_name = "zypi0"
+    
+    # Create TAP device
     System.cmd("ip", ["tuntap", "add", tap_name, "mode", "tap"], stderr_to_stdout: true)
-    System.cmd("ip", ["addr", "add", "#{gateway}/24", "dev", tap_name], stderr_to_stdout: true)
     System.cmd("ip", ["link", "set", tap_name, "up"], stderr_to_stdout: true)
+    
+    # Add TAP to bridge
+    System.cmd("ip", ["link", "set", tap_name, "master", bridge_name], stderr_to_stdout: true)
+    
+    # IP forwarding (ensure it's enabled)
     System.cmd("sysctl", ["-w", "net.ipv4.ip_forward=1"], stderr_to_stdout: true)
-
-    subnet = "#{a}.#{b}.#{c}.0/24"
-    case System.cmd("iptables", ["-t", "nat", "-C", "POSTROUTING", "-s", subnet, "-j", "MASQUERADE"], stderr_to_stdout: true) do
-      {_, 0} -> :ok
-      _ -> System.cmd("iptables", ["-t", "nat", "-A", "POSTROUTING", "-s", subnet, "-j", "MASQUERADE"], stderr_to_stdout: true)
-    end
 
     {:ok, tap_name}
   end

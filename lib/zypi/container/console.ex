@@ -143,11 +143,6 @@ defmodule Zypi.Container.Console do
   end
 
   @impl true
-  def handle_call(:get_output, _from, state) do
-    {:reply, state.buffer, state}
-  end
-
-  @impl true
   def handle_cast({:vm_output_from_manager, data}, state) do
     # Append to buffer (keep last 64KB for more history)
     new_buffer = state.buffer <> data
@@ -168,6 +163,11 @@ defmodule Zypi.Container.Console do
   @impl true
   def handle_cast(:clear_buffer, state) do
     {:noreply, %{state | buffer: ""}}
+  end
+
+  @impl true
+  def handle_call(:get_output, _from, state) do
+    {:reply, state.buffer, state}
   end
 
   @impl true

@@ -8,8 +8,7 @@ defmodule Zypi.Application do
   @impl true
   def start(_type, _args) do
     Zypi.System.Stats.init()
-    
-    # Detect SSH key path from available rootfs images
+    setup_network_bridge()
     detect_and_set_ssh_key_path()
 
     children = [
@@ -25,6 +24,32 @@ defmodule Zypi.Application do
 
     opts = [strategy: :one_for_one, name: Zypi.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp setup_network_bridge do
+    bridge_name = "zypi0"
+    gateway_ip = "10.0.0.1"
+    
+    # Create bridge if it doesn't exist
+    case System.cmd("ip", ["link", "show", bridge_name], stderr_to_stdout: true) do
+      {_, 0} ->
+        # Bridge exists
+        :ok
+      _ ->
+        # Create bridge
+        System.cmd("ip", ["link", "add", bridge_name, "type", "bridge"])
+        System.cmd("ip", ["addr", "add", "#{gateway_ip}/24", "dev", bridge_name])
+        System.cmd("ip", ["link", "set", bridge_name, "up"])
+        
+        # Enable IP forwarding
+        System.cmd("sysctl", ["-w", "net.ipv4.ip_forward=1"])
+        
+        # Setup NAT
+        System.cmd("iptables", ["-t", "nat", "-A", "POSTROUTING", "-s", "10.0.0.0/24", "-j", "MASQUERADE"])
+    end
+    
+    require Logger
+    Logger.info("Network bridge #{bridge_name} configured")
   end
 
   defp detect_and_set_ssh_key_path do

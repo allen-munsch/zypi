@@ -65,6 +65,7 @@ RUN mkdir -p /opt/zypi/rootfs && \
     mkdir -p squashfs-root/root/.ssh && \
     cp -v id_rsa.pub squashfs-root/root/.ssh/authorized_keys && \
     mv -v id_rsa /opt/zypi/rootfs/ubuntu-$ubuntu_version.id_rsa && \
+    mv -v id_rsa.pub /opt/zypi/rootfs/ubuntu-$ubuntu_version.id_rsa.pub && \
     \
     # Create EXT4 Filesystem Image
     chown -R root:root squashfs-root && \

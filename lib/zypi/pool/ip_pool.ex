@@ -17,7 +17,7 @@ defmodule Zypi.Pool.IPPool do
     {a, b, c, _} = Keyword.get(config, :ip_subnet, @default_subnet)
     size = Keyword.get(config, :ip_pool_size, @default_size)
 
-    available = for i <- 1..size, do: {a, b, c, i}
+    available = for i <- 2..size, do: {a, b, c, i}
     {:ok, %__MODULE__{subnet: {a, b, c}, available: available, allocated: MapSet.new()}}
   end
 
