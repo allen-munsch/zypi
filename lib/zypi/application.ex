@@ -16,7 +16,8 @@ defmodule Zypi.Application do
       Zypi.Image.Supervisor,
       Zypi.Container.Supervisor,
       Zypi.Scheduler.Supervisor,
-      Zypi.API.Supervisor
+      Zypi.API.Supervisor,
+      Zypi.API.ConsoleSocket # Add the new ConsoleSocket supervisor
     ]
 
     opts = [strategy: :one_for_one, name: Zypi.Supervisor]

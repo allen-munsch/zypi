@@ -3,6 +3,7 @@ defmodule Zypi.Container.RuntimeFirecracker do
   Firecracker microVM runtime for Zypi containers.
   """
   require Logger
+  alias Zypi.Container.Console
 
   @data_dir Application.compile_env(:zypi, :data_dir, "/var/lib/zypi")
   @vm_dir Path.join( @data_dir, "vms")
@@ -30,13 +31,16 @@ defmodule Zypi.Container.RuntimeFirecracker do
          :ok <- configure_vm(socket_path, container, tap),
          :ok <- start_instance(socket_path) do
 
-      reader = spawn_link(fn -> monitor_vm(container.id, fc_port) end)
+      {:ok, console_pid} = Zypi.Container.Console.start_link(container.id, fc_port)
+      
+      # The monitor_vm will now send output to the console_pid
+      spawn_link(fn -> monitor_vm(container.id, fc_port, console_pid) end)
 
       {:ok, %VMState{
         socket_path: socket_path,
         fc_port: fc_port,
         tap_device: tap,
-        reader_pid: reader
+        reader_pid: console_pid
       }}
     else
       {:error, reason} = err ->
@@ -279,24 +283,30 @@ defmodule Zypi.Container.RuntimeFirecracker do
     System.cmd("ip", ["link", "del", tap_name], stderr_to_stdout: true)
     System.cmd("pkill", ["-f", "firecracker.*api.sock"], stderr_to_stdout: true)
     File.rm_rf(Path.join( @vm_dir, container_id))
+  # FIXED: Use the correct API to stop console
+  Zypi.Container.Console.stop(container_id)
     :ok
   end
 
-  defp monitor_vm(container_id, fc_port) do
+  defp monitor_vm(container_id, fc_port, console_pid) do
     receive do
       {^fc_port, {:data, data}} ->
         # Firecracker sends serial output here when run in foreground
-        send(Zypi.Container.Manager, {:vm_output, container_id, data})
-        monitor_vm(container_id, fc_port)
+        send(console_pid, {:vm_output, data})
+        monitor_vm(container_id, fc_port, console_pid)
       {^fc_port, {:exit_status, status}} ->
         Logger.info("VM #{container_id} exited with status #{status}")
-        send(Zypi.Container.Manager, {:vm_exited, container_id, status})
+        send(Zypi.Container.Manager, {:vm_exited, container_id, status}) # Still send exit status to manager
       :stop ->
         :ok
     after
       100 ->
-        monitor_vm(container_id, fc_port)
+        monitor_vm(container_id, fc_port, console_pid)
     end
+  end
+
+  def send_input(container_id, input) do
+    Zypi.Container.Console.send_input(container_id, input)
   end
 
   defp mac_for_id(id) do

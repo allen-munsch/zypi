@@ -34,12 +34,27 @@ zypi() {
     logs)
       _api GET "/containers/$2/logs" | jq -r '.logs'
       ;; 
-    attach)
-      docker compose exec -T $SERVICE curl -sN "${API}/containers/$2/attach" | \
-        while read -r line; do
-          [[ "$line" == data:* ]] && echo "${line#data: }" | base64 -d
-        done
-      ;; 
+        attach)
+          local id="$2"
+          if [ -z "$id" ]; then echo "Usage: zypi attach <id>"; return 1; fi
+
+          # Get the console port from the API
+          local CONSOLE_PORT=$(docker compose exec -T $SERVICE curl -sf "${API}/containers/${id}/console_port" | jq -r '.port')
+          if [ -z "$CONSOLE_PORT" ] || [ "$CONSOLE_PORT" = "null" ]; then
+            echo "Error: Could not get console port for container ${id}. Is it running?"
+            return 1
+          fi
+
+          echo "Attaching to container ${id} on port ${CONSOLE_PORT}..."
+          echo "Press Ctrl-C to detach."
+
+          # Use socat for bidirectional communication
+          # Send ATTACH command, then relay stdio
+          docker compose exec -it $SERVICE sh -c "
+            (echo 'ATTACH:${id}'; cat) | socat - TCP:localhost:${CONSOLE_PORT}
+          "
+          ;;
+     
     status)
       _api GET "/containers/$2" | jq .
       ;; 

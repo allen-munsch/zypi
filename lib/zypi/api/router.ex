@@ -7,6 +7,7 @@ defmodule Zypi.API.Router do
   alias Zypi.Image.{Delta, Registry}
   alias Zypi.Image.Warmer
   alias Zypi.Pool.DevicePool
+  alias Zypi.API.ConsoleSocket # Alias for the ConsoleSocket
 
   plug Plug.Logger
   plug :match
@@ -138,6 +139,14 @@ defmodule Zypi.API.Router do
     case Containers.get(id) do
       {:ok, c} -> send_json(conn, 200, container_json(c))
       {:error, :not_found} -> send_json(conn, 404, %{error: "not_found"})
+    end
+  end
+
+  get "/containers/:id/console_port" do
+    if Containers.get(id) do
+      send_json(conn, 200, %{port: ConsoleSocket.get_port()})
+    else
+      send_json(conn, 404, %{error: "not_found"})
     end
   end
 
