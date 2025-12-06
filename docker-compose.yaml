@@ -5,26 +5,24 @@ services:
       dockerfile: Dockerfile
     image: zypi:latest
     container_name: zypi-node
-    # WARNING: Privileged mode is required for Zypi to interact with the host's
-    # device mapper (dmsetup) and loop devices (losetup) for managing
-    # overlaybd snapshots. This grants the container nearly full access to the
-    # host system, which has significant security implications.
-    # Do not run this in an untrusted environment.
-    cgroup: host  # Use host cgroup namespace
+    cgroup: host
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    devices:
+      - /dev/kvm:/dev/kvm
+      - /dev/net/tun:/dev/net/tun
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
-      # Mount the host's temporary registry path into the container
       - ./.zypi/registry:/mnt/zypi-registry
-      # Mount /dev to allow the container to see and manage host devices.
       - /dev:/dev
-      # Mount the zypi data directory to persist state across container restarts.
       - ./.zypi/data:/var/lib/zypi
-      - ${TEST_REGISTRY_MOUNT:-/tmp:/tmp}
-    privileged: true
     environment:
       - ZYPI_DATA_DIR=/var/lib/zypi
-    # For a multi-node setup, you would use a network and define hostnames.
-    # For a single-node smoke test, this is sufficient.
+      - ZYPI_KERNEL_PATH=/opt/zypi/kernel/vmlinux
+      - ZYPI_LOG_LEVEL=debug
+      - MIX_ENV=dev
     networks:
       - zypi_net
 

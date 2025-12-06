@@ -1,23 +1,23 @@
 defmodule Zypi.Container.Manager do
   @moduledoc """
-  Manages container lifecycle with output capture and attach support.
+  Manages container lifecycle with Firecracker VM support.
   """
   use GenServer
   require Logger
 
   alias Zypi.Store.Containers
   alias Zypi.Store.Containers.Container
-  alias Zypi.Pool.{DevicePool, ThinPool, IPPool}
+  alias Zypi.Pool.{DevicePool, IPPool}
   alias Zypi.Container.Runtime
 
   @output_buffer_size 1000
 
-  defstruct outputs: %{}, subscribers: %{}
+  defstruct outputs: %{}, subscribers: %{}, vm_states: %{}, buffer: ""
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  def create(params), do: GenServer.call(__MODULE__, {:create, params}, 10_000)
-  def start(container_id), do: GenServer.call(__MODULE__, {:start, container_id}, 10_000)
+  def create(params), do: GenServer.call(__MODULE__, {:create, params}, 30_000)
+  def start(container_id), do: GenServer.call(__MODULE__, {:start, container_id}, 30_000)
   def stop(container_id), do: GenServer.call(__MODULE__, {:stop, container_id}, 10_000)
   def destroy(container_id), do: GenServer.call(__MODULE__, {:destroy, container_id}, 10_000)
   def get(container_id), do: Containers.get(container_id)
@@ -29,7 +29,7 @@ defmodule Zypi.Container.Manager do
 
   @impl true
   def init(_opts) do
-    Logger.info("Zypi.Container.Manager initialized")
+    Logger.info("Container.Manager initialized (Firecracker runtime)")
     {:ok, %__MODULE__{}}
   end
 
@@ -41,8 +41,11 @@ defmodule Zypi.Container.Manager do
   @impl true
   def handle_call({:start, id}, _from, state) do
     case do_start(id) do
-      {:ok, _port} ->
-        state = %{state | outputs: Map.put(state.outputs, id, [])}
+      {:ok, vm_state} ->
+        state = %{state |
+          outputs: Map.put(state.outputs, id, []),
+          vm_states: Map.put(state.vm_states, id, vm_state)
+        }
         {:reply, {:ok, id}, state}
       error ->
         {:reply, error, state}
@@ -51,16 +54,20 @@ defmodule Zypi.Container.Manager do
 
   @impl true
   def handle_call({:stop, id}, _from, state) do
-    result = do_stop(id)
+    vm_state = Map.get(state.vm_states, id)
+    result = do_stop(id, vm_state)
+    state = %{state | vm_states: Map.delete(state.vm_states, id)}
     {:reply, result, state}
   end
 
   @impl true
   def handle_call({:destroy, id}, _from, state) do
-    result = do_destroy(id)
+    vm_state = Map.get(state.vm_states, id)
+    result = do_destroy(id, vm_state)
     state = %{state |
       outputs: Map.delete(state.outputs, id),
-      subscribers: Map.delete(state.subscribers, id)
+      subscribers: Map.delete(state.subscribers, id),
+      vm_states: Map.delete(state.vm_states, id)
     }
     {:reply, result, state}
   end
@@ -86,34 +93,106 @@ defmodule Zypi.Container.Manager do
   end
 
   @impl true
-  def handle_info({port, {:data, data}}, state) when is_port(port) do
-    case find_container_by_port(port) do
-      {:ok, container_id} ->
-        state = buffer_output(state, container_id, data)
-        broadcast_output(state, container_id, data)
-        {:noreply, state}
-      :not_found ->
-        {:noreply, state}
-    end
+  def handle_info({:vm_output, container_id, data}, state) do
+    # Log the VM output line by line
+    data
+    |> String.split("\n", trim: true)
+    |> Enum.each(fn line ->
+      Logger.debug("VM #{container_id}: #{line}")
+    end)
+
+    state = buffer_output(state, container_id, data)
+    broadcast_output(state, container_id, data)
+    {:noreply, state}
   end
 
   @impl true
-  def handle_info({port, {:exit_status, status}}, state) when is_port(port) do
-    case find_container_by_port(port) do
-      {:ok, container_id} ->
-        Logger.info("Container #{container_id} exited with status #{status}")
-        Containers.update(container_id, %{status: :exited, pid: nil})
-        broadcast_output(state, container_id, "\n[Process exited with status #{status}]\n")
-        {:noreply, state}
-      :not_found ->
-        {:noreply, state}
-    end
+  def handle_info({:vm_exited, container_id, status}, state) do
+    Logger.info("VM #{container_id} exited with status #{status}")
+    Containers.update(container_id, %{status: :exited})
+    broadcast_output(state, container_id, "\n[VM exited with status #{status}]\n")
+    {:noreply, state}
   end
 
+  @impl true
+  def handle_info({port, {:data, data}}, %{buffer: buffer} = state) when is_port(port) do
+    # 'data' is already a string/binary
+    new_buffer = buffer <> data
+
+    {lines, remainder} = split_lines(new_buffer)
+
+    Enum.each(lines, fn line ->
+      Logger.debug("Manager received line: #{line}")
+    end)
+
+    {:noreply, %{state | buffer: remainder}}
+  end
+
+  # Catch-all for other messages, if you want
   @impl true
   def handle_info(msg, state) do
-    Logger.debug("Container.Manager received: #{inspect(msg)}")
+    Logger.debug("Manager received unknown msg: #{inspect(msg)}")
     {:noreply, state}
+  end
+
+  defp split_lines(buffer) do
+    parts = String.split(buffer, "\r\n", trim: false)
+    lines = Enum.drop(parts, -1)       # all complete lines
+    remainder = List.last(parts) || "" # incomplete line
+    {lines, remainder}
+  end
+
+  # defp do_create(params) do
+  #   container_id = params[:id] || generate_id()
+  #   image_ref = params[:image]
+  #   start_us = System.monotonic_time(:microsecond)
+
+  #   with {:ok, _device} <- DevicePool.acquire(image_ref),
+  #        {:ok, snapshot} <- ThinPool.create_snapshot(image_ref, container_id),
+  #        {:ok, ip} <- IPPool.acquire() do
+
+  #     container = %Container{
+  #       id: container_id,
+  #       image: image_ref,
+  #       rootfs: snapshot,
+  #       ip: ip,
+  #       status: :created,
+  #       created_at: DateTime.utc_now(),
+  #       resources: params[:resources] || %{cpu: 1, memory_mb: 128},
+  #       metadata: params[:metadata] || %{}
+  #     }
+
+  #     Containers.put(container)
+  #     elapsed = System.monotonic_time(:microsecond) - start_us
+  #     Logger.info("Container #{container_id} created in #{elapsed}µs")
+  #     {:ok, container}
+  #   else
+  #     {:error, :pool_empty} ->
+  #       Logger.warning("Device pool empty for #{image_ref}, warming")
+  #       DevicePool.warm(image_ref)
+  #       {:error, :image_not_ready}
+  #     {:error, reason} = err ->
+  #       Logger.error("Create failed: #{inspect(reason)}")
+  #       err
+  #   end
+  # end
+
+  defp do_start(container_id) do
+    case Containers.get(container_id) do
+      {:ok, %{status: :running}} ->
+        {:error, :already_running}
+      {:ok, container} ->
+        case Runtime.start(container) do
+          {:ok, vm_state} ->
+            Containers.update(container_id, %{status: :running, started_at: DateTime.utc_now()})
+            Logger.info("Container #{container_id} started as Firecracker VM")
+            {:ok, vm_state}
+          {:error, reason} ->
+            Logger.error("Start failed: #{inspect(reason)}")
+            {:error, reason}
+        end
+      error -> error
+    end
   end
 
   defp do_create(params) do
@@ -121,102 +200,114 @@ defmodule Zypi.Container.Manager do
     image_ref = params[:image]
     start_us = System.monotonic_time(:microsecond)
 
-    with {:ok, _base_device} <- DevicePool.acquire(image_ref),
-         {:ok, snapshot} <- ThinPool.create_snapshot(image_ref, container_id),
-         {:ok, ip} <- IPPool.acquire() do
+    base_image = DevicePool.image_path(image_ref)
 
-      container = %Container{
-        id: container_id,
-        image: image_ref,
-        rootfs: snapshot,
-        ip: ip,
-        status: :created,
-        created_at: DateTime.utc_now(),
-        resources: params[:resources] || %{cpu: 1, memory_mb: 256},
-        metadata: params[:metadata] || %{}
-      }
-
-      Containers.put(container)
-      elapsed_us = System.monotonic_time(:microsecond) - start_us
-      Logger.info("Container #{container_id} created in #{elapsed_us}µs")
-      {:ok, container}
-    else
+    # Ensure image is ready
+    result = case DevicePool.acquire(image_ref) do
+      {:ok, path} -> {:ok, path}
       {:error, :pool_empty} ->
-        Logger.warning("Device pool empty for #{image_ref}, triggering warm")
+        Logger.info("Image not ready, warming...")
         DevicePool.warm(image_ref)
-        {:error, :image_not_ready}
-      {:error, reason} = error ->
-        Logger.error("Container create failed: #{inspect(reason)}")
-        error
+        # Wait for warming (with timeout)
+        wait_for_image(image_ref, 30_000)
     end
-  end
-  defp do_start(container_id) do
-    case Containers.get(container_id) do
-      {:ok, %{status: :running}} ->
-        {:error, :already_running}
-      {:ok, container} ->
-        case Runtime.start(container) do
-          {:ok, pid} when is_integer(pid) or is_binary(pid) ->
-            Containers.update(container_id, %{status: :running, started_at: DateTime.utc_now()})
-            Logger.info("Container #{container_id} started with PID: #{pid}")
-            {:ok, pid}
-          {:ok, port} when is_port(port) ->
-            Containers.update(container_id, %{status: :running, started_at: DateTime.utc_now(), pid: port})
-            Logger.info("Container #{container_id} started with port: #{inspect(port)}")
-            {:ok, port}
+
+    case result do
+      {:ok, base_path} ->
+        # Create snapshot for this container
+        case Zypi.Pool.SnapshotPool.create_snapshot(image_ref, container_id, base_path) do
+          {:ok, snapshot_device} ->
+            with {:ok, ip} <- IPPool.acquire() do
+              container = %Container{
+                id: container_id,
+                image: image_ref,
+                rootfs: snapshot_device,
+                ip: ip,
+                status: :created,
+                created_at: DateTime.utc_now(),
+                resources: params[:resources] || %{cpu: 1, memory_mb: 128},
+                metadata: params[:metadata] || %{}
+              }
+
+              Containers.put(container)
+              elapsed = System.monotonic_time(:microsecond) - start_us
+              Logger.info("Container #{container_id} created in #{elapsed}µs")
+              {:ok, container}
+            end
+
           {:error, reason} ->
-            Logger.error("Failed to start container #{container_id}: #{inspect(reason)}")
+            Logger.error("Failed to create snapshot: #{inspect(reason)}")
             {:error, reason}
-          other ->
-            Logger.error("Unexpected result from Runtime.start: #{inspect(other)}")
-            {:error, :runtime_error}
         end
-      error ->
-        error
+
+      {:error, :timeout} ->
+        {:error, :image_not_ready}
     end
   end
 
-  defp do_stop(container_id) do
-    case Containers.get(container_id) do
-      {:ok, %{status: :exited}} ->
-        {:ok, container_id}
-      {:ok, %{pid: port} = container} when not is_nil(port) ->
-        Runtime.stop(container)
-        Containers.update(container_id, %{status: :stopped, pid: nil})
-        {:ok, container_id}
-      {:ok, %{status: status}} when status in [:stopped, :created] ->
-        {:ok, container_id}
-      {:ok, _} ->
-        {:error, :not_running}
-      error ->
-        error
+  defp wait_for_image(image_ref, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait_for_image(image_ref, deadline)
+  end
+
+  defp do_wait_for_image(image_ref, deadline) do
+    if System.monotonic_time(:millisecond) > deadline do
+      {:error, :timeout}
+    else
+      case DevicePool.acquire(image_ref) do
+        {:ok, path} -> {:ok, path}
+        {:error, :pool_empty} ->
+          Process.sleep(500)
+          do_wait_for_image(image_ref, deadline)
+      end
     end
   end
 
-  defp do_destroy(container_id) do
+  defp do_destroy(container_id, vm_state) do
     case Containers.get(container_id) do
       {:ok, container} ->
-        if container.status == :running, do: Runtime.stop(container)
+        if container.status == :running and vm_state do
+          Runtime.stop(%{container | pid: vm_state})
+        end
         Runtime.cleanup_rootfs(container_id)
-        ThinPool.destroy_snapshot(container.image, container_id)
+        Zypi.Pool.SnapshotPool.destroy_snapshot(container.image, container_id)
         if container.ip, do: IPPool.release(container.ip)
         Containers.delete(container_id)
         {:ok, container_id}
-      error ->
-        error
+      error -> error
     end
   end
 
-  defp find_container_by_port(port) do
-    case Enum.find(Containers.list(), fn c -> c.pid == port end) do
-      nil -> :not_found
-      container -> {:ok, container.id}
+  defp do_stop(container_id, vm_state) do
+    case Containers.get(container_id) do
+      {:ok, %{status: status}} when status in [:exited, :stopped, :created] ->
+        {:ok, container_id}
+      {:ok, container} ->
+        if vm_state, do: Runtime.stop(%{container | pid: vm_state})
+        Containers.update(container_id, %{status: :stopped})
+        {:ok, container_id}
+      error -> error
     end
   end
+
+  # defp do_destroy(container_id, vm_state) do
+  #   case Containers.get(container_id) do
+  #     {:ok, container} ->
+  #       if container.status == :running and vm_state do
+  #         Runtime.stop(%{container | pid: vm_state})
+  #       end
+  #       Runtime.cleanup_rootfs(container_id)
+  #       ThinPool.destroy_snapshot(container.image, container_id)
+  #       if container.ip, do: IPPool.release(container.ip)
+  #       Containers.delete(container_id)
+  #       {:ok, container_id}
+  #     error -> error
+  #   end
+  # end
 
   defp buffer_output(state, container_id, data) do
     buffer = Map.get(state.outputs, container_id, [])
-    buffer = [data | buffer] |> Enum.take(@output_buffer_size)
+    buffer = [data | buffer] |> Enum.take( @output_buffer_size)
     %{state | outputs: Map.put(state.outputs, container_id, buffer)}
   end
 
@@ -227,7 +318,5 @@ defmodule Zypi.Container.Manager do
     end)
   end
 
-  defp generate_id do
-    "ctr_" <> (:crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower))
-  end
+  defp generate_id, do: "ctr_" <> (:crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower))
 end

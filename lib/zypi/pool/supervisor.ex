@@ -8,7 +8,7 @@ defmodule Zypi.Pool.Supervisor do
   @impl true
   def init(_opts) do
     children = [
-      Zypi.Pool.ThinPool,
+      Zypi.Pool.SnapshotPool,
       Zypi.Pool.IPPool,
       Zypi.Pool.DevicePool
     ]
