@@ -1,1 +1,5 @@
 .zypi/
+_build/
+accelerated-container-image/
+context/
+deps/
