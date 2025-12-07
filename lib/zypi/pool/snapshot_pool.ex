@@ -33,17 +33,20 @@ defmodule Zypi.Pool.SnapshotPool do
     File.mkdir_p!(container_dir)
 
     Logger.info("SnapshotPool: Creating rootfs copy for #{container_id}")
-    Logger.info("SnapshotPool: Source: #{base_image_path}")
-    Logger.info("SnapshotPool: Target: #{rootfs_path}")
 
-    # Try reflink first (instant CoW on btrfs/xfs), fall back to regular copy
-    result = case System.cmd("cp", ["--reflink=auto", "--sparse=always", base_image_path, rootfs_path], stderr_to_stdout: true) do
-      {_, 0} ->
+    # Use dd for reliable block-level copy instead of cp --reflink
+    result = case System.cmd("dd", [
+      "if=#{base_image_path}",
+      "of=#{rootfs_path}",
+      "bs=4M",
+      "conv=sparse"
+    ], stderr_to_stdout: true) do
+      {_output, 0} ->
         Logger.info("SnapshotPool: Created rootfs for #{container_id}")
         {:ok, rootfs_path}
       {err, code} ->
-        Logger.error("SnapshotPool: Copy failed (#{code}): #{err}")
-        {:error, {:copy_failed, code, err}}
+        Logger.error("SnapshotPool: dd failed (#{code}): #{err}")
+        {:error, {:dd_failed, code, err}}
     end
 
     {:reply, result, state}

@@ -125,7 +125,7 @@ zypi() {
       #   return 1
       # fi
       
-      echo "Connecting via SSH to ${USER} @${IP}..."
+      echo "Connecting via SSH to ${USER}@${IP}..."
       echo "Press Ctrl-D or type 'exit' to disconnect."
       echo ""
       
@@ -136,7 +136,7 @@ zypi() {
         -o LogLevel=ERROR \
         -o ConnectTimeout=10 \
         -p "$PORT" \
-        "${USER} @${IP}"
+        "${USER}@${IP}"
       ;;
      
     status)

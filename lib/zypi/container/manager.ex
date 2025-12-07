@@ -81,8 +81,54 @@ defmodule Zypi.Container.Manager do
 
   @impl true
   def init(_opts) do
+    # Clean up any orphaned consoles from previous Manager instances
+    cleanup_orphaned_consoles()
+    
     Logger.info("Container.Manager initialized (Firecracker runtime)")
     {:ok, %__MODULE__{}}
+  end
+
+  defp cleanup_orphaned_consoles do
+    # Get all containers from store
+    containers = Zypi.Store.Containers.list()
+    container_ids = Enum.map(containers, & &1.id) |> MapSet.new()
+    
+    # Find all globally registered consoles
+    # :global.registered_names() returns all global names
+    :global.registered_names()
+    |> Enum.filter(fn
+      {:zypi_console, _vm_id} -> true
+      _ -> false
+    end)
+    |> Enum.each(fn {:zypi_console, vm_id} = name ->
+      # If container doesn't exist or isn't running, stop the console
+      container = Enum.find(containers, & &1.id == vm_id)
+      
+      should_stop = cond do
+        is_nil(container) -> 
+          Logger.debug("Cleaning up orphaned console for non-existent container #{vm_id}")
+          true
+        container.status not in [:running, :starting] ->
+          Logger.debug("Cleaning up console for non-running container #{vm_id} (status: #{container.status})")
+          true
+        true ->
+          false
+      end
+      
+      if should_stop do
+        case :global.whereis_name(name) do
+          :undefined -> :ok
+          pid -> 
+            try do
+              GenServer.stop(pid, :normal, 1000)
+            catch
+              _, _ -> :ok
+            end
+        end
+      end
+    end)
+  rescue
+    e -> Logger.warning("Error during console cleanup: #{inspect(e)}")
   end
 
   @impl true

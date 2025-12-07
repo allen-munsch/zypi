@@ -7,11 +7,25 @@ defmodule Zypi.Container.Console do
   Called by RuntimeFirecracker when VM starts.
   """
   def start_link(vm_id, fc_port, opts \\ []) do
-    # Remove any conflicting name from opts
     opts = Keyword.delete(opts, :name)
-    GenServer.start_link(__MODULE__, {vm_id, fc_port}, [name: via_tuple(vm_id)] ++ opts)
+    
+    case GenServer.whereis(via_tuple(vm_id)) do
+      nil ->
+        # No existing process, start fresh
+        GenServer.start_link(__MODULE__, {vm_id, fc_port}, [name: via_tuple(vm_id)] ++ opts)
+        
+      existing_pid ->
+        # Process exists - check if it's alive
+        if Process.alive?(existing_pid) do
+          {:error, {:already_started, existing_pid}}
+        else
+          # Process registered but dead (shouldn't happen with :global, but be safe)
+          # Unregister and start fresh
+          :global.unregister_name({:zypi_console, vm_id})
+          GenServer.start_link(__MODULE__, {vm_id, fc_port}, [name: via_tuple(vm_id)] ++ opts)
+        end
+    end
   end
-
   @doc """
   Check if a console exists for the given VM.
   """
@@ -85,14 +99,33 @@ defmodule Zypi.Container.Console do
   @doc """
   Stops the console GenServer.
   """
-  def stop(vm_id) do
-    case GenServer.whereis(via_tuple(vm_id)) do
-      nil -> :ok
-      pid -> GenServer.stop(pid, :normal, 5000)
-    end
-  catch
-    :exit, _ -> :ok
+   @doc """
+Stops the console GenServer. Safe to call even if console doesn't exist.
+"""
+def stop(vm_id) do
+  case GenServer.whereis(via_tuple(vm_id)) do
+    nil -> 
+      :ok
+    pid -> 
+      try do
+        GenServer.stop(pid, :normal, 5000)
+      catch
+        :exit, {:noproc, _} -> :ok
+        :exit, {:normal, _} -> :ok
+        :exit, _ -> :ok
+      end
   end
+end
+
+ @doc """
+Restarts the console with a new Firecracker port.
+Stops existing console if present, then starts fresh.
+"""
+def restart(vm_id, fc_port) do
+  stop(vm_id)
+  Process.sleep(50)  # Allow cleanup to complete
+  start_link(vm_id, fc_port)
+end
 
   @doc """
   Clear the console buffer.
