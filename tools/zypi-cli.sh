@@ -35,10 +35,8 @@ zypi() {
       local ref="$2"
       if [ -z "$ref" ]; then echo "Usage: zypi push <image:tag>"; return 1; fi
       echo "==> Pushing ${ref} to Zypi..."
-      docker save "$ref" | docker compose exec -T $SERVICE curl -sf -X POST \
-        -H "Content-Type: application/octet-stream" \
-        --data-binary @tools/extract-docker-image.sh "${API}/images/${ref}/import" | jq .
-      ;; 
+      docker save "$ref" | docker compose exec -T $SERVICE curl -sf -X POST -H "Content-Type: application/octet-stream" --data-binary @- "${API}/images/${ref}/import" | jq .
+      ;;
     images)
       _api GET "/images" | jq .
       ;; 
