@@ -8,6 +8,7 @@ defmodule Zypi.Image.Supervisor do
   @impl true
   def init(_opts) do
     children = [
+      {Task.Supervisor, name: Zypi.ImporterTasks},
       Zypi.Image.Importer
     ]
 

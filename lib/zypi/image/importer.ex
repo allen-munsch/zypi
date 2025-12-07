@@ -14,7 +14,10 @@ defmodule Zypi.Image.Importer do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
   def import_tar(ref, tar_data) do
-    GenServer.call(__MODULE__, {:import, ref, tar_data}, 300_000)
+    Task.Supervisor.async_nolink(Zypi.ImporterTasks, fn ->
+      do_import(ref, tar_data)
+    end)
+    |> Task.await(300_000)
   end
 
   @impl true
@@ -56,21 +59,45 @@ defmodule Zypi.Image.Importer do
   end
 
   defp build_ext4_image(ref, base_ext4, docker_layers, container_config) do
-  encoded = Base.url_encode64(ref, padding: false)
-  ext4_path = Path.join(@images_dir, "#{encoded}.ext4")
+    layer_hash = hash_layers(docker_layers)
+    cached_path = Path.join(@images_dir, "cache-#{layer_hash}.ext4")
 
-  {_, 0} = System.cmd("cp", ["--reflink=auto", base_ext4, ext4_path], stderr_to_stdout: true)
+    if File.exists?(cached_path) do
+      Logger.info("Using cached image for layer hash #{layer_hash}")
+      encoded = Base.url_encode64(ref, padding: false)
+      ext4_path = Path.join(@images_dir, "#{encoded}.ext4")
+      {_, 0} = System.cmd("cp", ["--reflink=auto", "--sparse=always", cached_path, ext4_path], stderr_to_stdout: true)
+      :ok = inject_init(ext4_path, container_config)
+      {:ok, ext4_path}
+    else
+      Logger.info("Building new image, will cache as #{layer_hash}")
+      {:ok, ext4_path} = do_build_ext4_image(ref, base_ext4, docker_layers, container_config)
+      System.cmd("cp", ["--reflink=auto", "--sparse=always", ext4_path, cached_path], stderr_to_stdout: true)
+      {:ok, ext4_path}
+    end
+  end
 
-  Enum.each(docker_layers, fn layer ->
-    Logger.info("Applying layer: #{Path.basename(layer)}")
-    {_, 0} = System.cmd("overlaybd-apply", [layer, ext4_path, "--raw"], stderr_to_stdout: true)
-  end)
+  defp hash_layers(docker_layers) do
+    docker_layers
+    |> Enum.map(&Path.basename/1)
+    |> Enum.sort()
+    |> Enum.join(":")
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+    |> binary_part(0, 16)
+  end
 
-  # Inject init script and SSH keys
-  :ok = inject_init(ext4_path, container_config)
-
-  {:ok, ext4_path}
-end
+  defp do_build_ext4_image(ref, base_ext4, docker_layers, container_config) do
+    encoded = Base.url_encode64(ref, padding: false)
+    ext4_path = Path.join(@images_dir, "#{encoded}.ext4")
+    {_, 0} = System.cmd("cp", ["--reflink=auto", "--sparse=always", base_ext4, ext4_path], stderr_to_stdout: true)
+    Enum.each(docker_layers, fn layer ->
+      Logger.info("Applying layer: #{Path.basename(layer)}")
+      {_, 0} = System.cmd("overlaybd-apply", [layer, ext4_path, "--raw"], stderr_to_stdout: true)
+    end)
+    :ok = inject_init(ext4_path, container_config)
+    {:ok, ext4_path}
+  end
 
   defp extract_tar(tar_path, dest) do
     File.mkdir_p!(dest)
@@ -113,6 +140,7 @@ end
       _ -> {:error, :layers_parse_failed}
     end
   end
+
   defp find_base_ext4 do
     case File.ls(@base_dir) do
       {:ok, files} ->
