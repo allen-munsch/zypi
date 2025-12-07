@@ -115,10 +115,10 @@ defmodule Zypi.Image.BaseRootfs do
   end
 
   defp generate_init_script(config) do
-    entrypoint = config[:entrypoint] || config["entrypoint"] || []
-    cmd = config[:cmd] || config["cmd"] || []
-    env = config[:env] || config["env"] || []
-    workdir = config[:workdir] || config["workdir"] || "/"
+    entrypoint = config.entrypoint || []
+    cmd = config.cmd || []
+    env = config.env || []
+    workdir = config.workdir || "/"
 
     main_cmd = case {entrypoint, cmd} do
       {[], []} -> nil
