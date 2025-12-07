@@ -1,14 +1,11 @@
 defmodule Zypi.Scheduler.Placement do
-  @moduledoc """
-  Decides which node should run a container.
-  """
   use GenServer
   require Logger
 
   alias Zypi.Store.Nodes
+  alias Zypi.Pool.ImageStore
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-
   def select_node(params), do: GenServer.call(__MODULE__, {:select, params})
 
   @impl true
@@ -27,7 +24,7 @@ defmodule Zypi.Scheduler.Placement do
     candidates = Nodes.list_healthy()
     |> filter_by_region(region)
     |> filter_by_resources(resources)
-    |> score_by_image_locality(image)
+    |> score_nodes(image)
     |> Enum.sort_by(& &1.score, :desc)
 
     case candidates do
@@ -48,7 +45,7 @@ defmodule Zypi.Scheduler.Placement do
     end)
   end
 
-  defp score_by_image_locality(nodes, image) do
+  defp score_nodes(nodes, image) do
     Enum.map(nodes, fn node ->
       image_score = if image_on_node?(image, node.id), do: 100, else: 0
       res = node.resources
@@ -58,5 +55,11 @@ defmodule Zypi.Scheduler.Placement do
     end)
   end
 
-  defp image_on_node?(_image, _node_id), do: false
+  defp image_on_node?(image, node_id) do
+    if node_id == Nodes.local_node_id() do
+      ImageStore.image_exists?(image)
+    else
+      false
+    end
+  end
 end

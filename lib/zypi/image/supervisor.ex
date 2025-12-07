@@ -1,8 +1,4 @@
 defmodule Zypi.Image.Supervisor do
-  @moduledoc """
-  Supervises image management processes.
-  """
-
   use Supervisor
 
   def start_link(opts) do
@@ -11,11 +7,8 @@ defmodule Zypi.Image.Supervisor do
 
   @impl true
   def init(_opts) do
-    Zypi.Image.Delta.init()
-
     children = [
-      Zypi.Image.Registry,
-      Zypi.Image.Warmer
+      Zypi.Image.Importer
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

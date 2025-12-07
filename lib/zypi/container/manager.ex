@@ -7,7 +7,7 @@ defmodule Zypi.Container.Manager do
 
   alias Zypi.Store.Containers
   alias Zypi.Store.Containers.Container
-  alias Zypi.Pool.{DevicePool, IPPool}
+  alias Zypi.Pool.IPPool
   alias Zypi.Container.Runtime
 
   @output_buffer_size 1000
@@ -269,12 +269,7 @@ defmodule Zypi.Container.Manager do
     {:noreply, state}
   end
 
-  defp split_lines(buffer) do
-    parts = String.split(buffer, "\r\n", trim: false)
-    lines = Enum.drop(parts, -1)       # all complete lines
-    remainder = List.last(parts) || "" # incomplete line
-    {lines, remainder}
-  end
+
 
   # defp do_create(params) do
   #   container_id = params[:id] || generate_id()
@@ -329,52 +324,52 @@ defmodule Zypi.Container.Manager do
     end
   end
 
-  defp do_create(params) do
-    container_id = params[:id] || generate_id()
-    image_ref = params[:image]
-    start_us = System.monotonic_time(:microsecond)
+defp do_create(params) do
+  container_id = params[:id] || generate_id()
+  image_ref = params[:image]
+  start_us = System.monotonic_time(:microsecond)
 
-    # No need to acquire from DevicePool or wait for warming, SnapshotPool will get Delta config
-    case Zypi.Pool.SnapshotPool.create_snapshot(image_ref, container_id) do
-      {:ok, snapshot_device} ->
-        with {:ok, ip} <- IPPool.acquire() do
-          container = %Container{
-            id: container_id,
-            image: image_ref,
-            rootfs: snapshot_device,
-            ip: ip,
-            status: :created,
-            created_at: DateTime.utc_now(),
-            resources: params[:resources] || %{cpu: 1, memory_mb: 128},
-            metadata: params[:metadata] || %{}
-          }
+  with {:ok, snapshot_path} <- Zypi.Pool.ImageStore.create_snapshot(image_ref, container_id),
+       {:ok, ip} <- IPPool.acquire() do
+    container = %Container{
+      id: container_id,
+      image: image_ref,
+      rootfs: snapshot_path,
+      ip: ip,
+      status: :created,
+      created_at: DateTime.utc_now(),
+      resources: params[:resources] || %{cpu: 1, memory_mb: 128},
+      metadata: params[:metadata] || %{}
+    }
 
-          Containers.put(container)
-          elapsed = System.monotonic_time(:microsecond) - start_us
-          Logger.info("Container #{container_id} created in #{elapsed}µs")
-          {:ok, container}
-        end
-
-      {:error, reason} ->
-        Logger.error("Failed to create snapshot: #{inspect(reason)}")
-        {:error, reason}
-    end
+    Containers.put(container)
+    elapsed = System.monotonic_time(:microsecond) - start_us
+    Logger.info("Container #{container_id} created in #{elapsed}µs")
+    {:ok, container}
+  else
+    {:error, :image_not_found} ->
+      Logger.error("Image not found: #{image_ref}")
+      {:error, :image_not_found}
+    {:error, reason} ->
+      Logger.error("Create failed: #{inspect(reason)}")
+      {:error, reason}
   end
+end
 
-  defp do_destroy(container_id, vm_state) do
-    case Containers.get(container_id) do
-      {:ok, container} ->
-        if container.status == :running and vm_state do
-          Runtime.stop(%{container | pid: vm_state})
-        end
-        Runtime.cleanup_rootfs(container_id)
-        Zypi.Pool.SnapshotPool.destroy_snapshot(container.image, container_id)
-        if container.ip, do: IPPool.release(container.ip)
-        Containers.delete(container_id)
-        {:ok, container_id}
-      error -> error
-    end
+defp do_destroy(container_id, vm_state) do
+  case Containers.get(container_id) do
+    {:ok, container} ->
+      if container.status == :running and vm_state do
+        Runtime.stop(%{container | pid: vm_state})
+      end
+      Runtime.cleanup_rootfs(container_id)
+      Zypi.Pool.ImageStore.destroy_snapshot(container_id)
+      if container.ip, do: IPPool.release(container.ip)
+      Containers.delete(container_id)
+      {:ok, container_id}
+    error -> error
   end
+end
 
   defp do_stop(container_id, vm_state) do
     case Containers.get(container_id) do

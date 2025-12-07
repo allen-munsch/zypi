@@ -16,8 +16,14 @@ services:
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - ./.zypi/registry:/mnt/zypi-registry
-      - /dev:/dev
       - ./.zypi/data:/var/lib/zypi
+      # OverlayBD mounts:
+      - ./.zypi/overlaybd:/mnt/zypi-overlaybd
+      - ./.zypi/overlaybd/images:/var/lib/overlaybd
+      # Replace internal config with yours
+      - ./config/overlaybd.json:/etc/overlaybd/overlaybd.json:ro
+      # (Optional, but recommended)
+      - /dev:/dev
     environment:
       - ZYPI_DATA_DIR=/var/lib/zypi
       - ZYPI_KERNEL_PATH=/opt/zypi/kernel/vmlinux

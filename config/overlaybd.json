@@ -1,0 +1,40 @@
+{
+  "logConfig": {
+    "logLevel": 1,
+    "logPath": "/mnt/zypi-overlaybd/logs/overlaybd.log"
+  },
+  "cacheConfig": {
+    "cacheType": "file",
+    "cacheDir": "/mnt/zypi-overlaybd/cache",
+    "cacheSizeGB": 4
+  },
+  "gzipCacheConfig": {
+    "enable": true,
+    "cacheDir": "/mnt/zypi-overlaybd/gzip",
+    "cacheSizeGB": 4
+  },
+  "credentialConfig": {
+    "mode": "file",
+    "path": "/mnt/zypi-overlaybd/creds/cred.json"
+  },
+  "ioEngine": 0,
+  "download": {
+    "enable": true,
+    "delay": 600,
+    "delayExtra": 30,
+    "maxMBps": 100
+  },
+  "p2pConfig": {
+    "enable": false,
+    "address": "localhost:19145/dadip2p"
+  },
+  "exporterConfig": {
+    "enable": false,
+    "uriPrefix": "/metrics",
+    "port": 9863,
+    "updateInterval": 60000000
+  },
+  "enableAudit": true,
+  "auditPath": "/mnt/zypi-overlaybd/logs/overlaybd-audit.log",
+  "registryFsVersion": "v2"
+}

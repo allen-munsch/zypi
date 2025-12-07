@@ -1,5 +1,5 @@
 
-for x in $(seq 2 4);do 
+for x in $(seq 2 3);do 
 	echo $x
 	pushd hello-zippy
 	docker build -t hello-zippy:v$x .

@@ -150,9 +150,25 @@ EOF \
     chown -R root:root squashfs-root && \
     truncate -s 2G /opt/zypi/rootfs/ubuntu-$ubuntu_version.ext4 && \
     mkfs.ext4 -d squashfs-root -F /opt/zypi/rootfs/ubuntu-$ubuntu_version.ext4 && \
+    tar -cf /opt/zypi/rootfs/ubuntu-$ubuntu_version.tar -C squashfs-root . && \
     echo "Verifying openssh installation..." && \
     debugfs -R "stat /usr/sbin/sshd" /opt/zypi/rootfs/ubuntu-$ubuntu_version.ext4 && \
     rm -rf squashfs-root /app/ubuntu.squashfs
+ENV PATH="/opt/overlaybd/bin:${PATH}"
+ENV OVERLAYBD_DATA_DIR="/var/lib/overlaybd"
+ENV OVERLAYBD_LOG_DIR="/mnt/zypi-overlaybd/logs"
+
+RUN mkdir -p "$OVERLAYBD_DATA_DIR/images" && \
+    mkdir -p "$OVERLAYBD_LOG_DIR" && \
+    chmod -R 777 "$OVERLAYBD_DATA_DIR" && \
+    chmod -R 777 "$OVERLAYBD_LOG_DIR" && \
+    mkdir -p /opt/overlaybd/registry_cache && \
+    mkdir -p /opt/overlaybd/gzip_cache && \
+    chmod -R 777 /opt/overlaybd/registry_cache && \
+    chmod -R 777 /opt/overlaybd/gzip_cache && \
+    touch /opt/overlaybd/cred.json && \
+    chmod 600 /opt/overlaybd/cred.json
+
 
 # Elixir setup
 RUN mix local.hex --force && mix local.rebar --force

@@ -222,7 +222,7 @@ defmodule Zypi.Container.RuntimeFirecracker do
     end
   end
 
-  def setup_tap(container_id, ip) do
+  def setup_tap(container_id, _ip) do
     setup_bridge()
     tap_name = "ztap#{:erlang.phash2(container_id, 9999)}"
     bridge_name = "zypi0"
@@ -326,7 +326,7 @@ defmodule Zypi.Container.RuntimeFirecracker do
   """
   def setup_bridge() do
     # Check if bridge exists
-    {output, exit_code} = System.cmd("ip", ["link", "show", "zypi0"], stderr_to_stdout: true)
+    {_output, exit_code} = System.cmd("ip", ["link", "show", "zypi0"], stderr_to_stdout: true)
 
     if exit_code != 0 do
       Logger.info("Creating zypi0 bridge")
