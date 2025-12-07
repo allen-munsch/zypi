@@ -37,7 +37,7 @@ cd zypi
 
 # Demo
 
-[demo video](docs/zypi-overlaybd-2025-12-07_15.14.49)
+[demo video](docs/zypi-overlaybd-2025-12-07_15.14.49.mp4)
 
 # Usage
 
