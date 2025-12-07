@@ -6,6 +6,27 @@ _api() {
   docker compose exec -T $SERVICE curl -sf -X "$1" -H "Content-Type: application/json" ${3:+-d "$3"} "${API}$2"
 }
 
+# Wait for SSH to be ready on a container
+wait_for_ssh() {
+  local id="$1"
+  local timeout="${2:-60}"
+  local elapsed=0
+  
+  echo -n "Waiting for SSH"
+  while [ $elapsed -lt $timeout ]; do
+    local ready=$(docker compose exec -T $SERVICE curl -sf "${API}/containers/${id}/ssh_ready" 2>/dev/null | jq -r '.ready // false')
+    if [ "$ready" = "true" ]; then
+      echo " ready!"
+      return 0
+    fi
+    echo -n "."
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  
+  echo " timeout!"
+  return 1
+}
 
 
 zypi() {
@@ -40,54 +61,41 @@ zypi() {
       local id="$2"
       if [ -z "$id" ]; then echo "Usage: zypi attach <id>"; return 1; fi
 
-      # Get the console port from the API
-      local CONSOLE_PORT=$(docker compose exec -T $SERVICE curl -sf "${API}/containers/${id}/console_port" | jq -r '.port')
+      local CONSOLE_PORT=$(docker compose exec -T $SERVICE curl -sf "${API}/containers/${id}/console_port" 2>/dev/null | jq -r '.port')
       if [ -z "$CONSOLE_PORT" ] || [ "$CONSOLE_PORT" = "null" ]; then
         echo "Error: Could not get console port for container ${id}. Is it running?"
         return 1
       fi
 
-      echo "Attaching to container ${id} on port ${CONSOLE_PORT}..."
+      echo "Attaching to container ${id} console output..."
+      echo "This is READ-ONLY. Use 'zypi shell ${id}' for interactive access."
       echo "Press Ctrl-C to detach."
       echo ""
 
-      # Use bash /dev/tcp for proper bidirectional I/O
-      docker compose exec -it $SERVICE bash -c '
-        # Open bidirectional TCP connection on fd 3
-        exec 3<>/dev/tcp/localhost/'"${CONSOLE_PORT}"'
-        
-        # Send the ATTACH command
-        echo "ATTACH:'"${id}"'" >&3
-        
-        # Background: read from TCP (fd 3) and write to stdout
-        cat <&3 &
-        READ_PID=$!
-        
-        # Cleanup on exit
-        trap "kill $READ_PID 2>/dev/null; exec 3>&-" EXIT INT TERM
-        
-        # Foreground: read from stdin and write to TCP (fd 3)
-        cat >&3
-      '
+      # Simple read-only attach - just view output
+      docker compose exec -it $SERVICE sh -c "
+        echo 'ATTACH:${id}' | nc -q0 localhost ${CONSOLE_PORT} || 
+        (echo 'ATTACH:${id}'; sleep infinity) | nc localhost ${CONSOLE_PORT}
+      "
       ;;
      
     shell)
       local id="$2"
       if [ -z "$id" ]; then 
         echo "Usage: zypi shell <container_id>"
-        echo "Opens an interactive shell in the running container"
+        echo "Opens an interactive SSH shell in the running container"
         return 1
       fi
 
       # Check if container is running
-      local STATUS=$(docker compose exec -T $SERVICE curl -sf "${API}/containers/${id}" | jq -r '.status // "unknown"')
+      local STATUS=$(docker compose exec -T $SERVICE curl -sf "${API}/containers/${id}" 2>/dev/null | jq -r '.status // "unknown"')
       if [ "$STATUS" != "running" ]; then
         echo "Error: Container ${id} is not running (status: ${STATUS})"
         return 1
       fi
 
       # Get shell info
-      local SHELL_INFO=$(docker compose exec -T $SERVICE curl -sf "${API}/containers/${id}/shell_info")
+      local SHELL_INFO=$(docker compose exec -T $SERVICE curl -sf "${API}/containers/${id}/shell_info" 2>/dev/null)
       
       if [ -z "$SHELL_INFO" ]; then
         echo "Error: Could not get shell info for container ${id}"
@@ -97,78 +105,38 @@ zypi() {
       # Check for errors
       local ERROR=$(echo "$SHELL_INFO" | jq -r '.error // empty')
       if [ -n "$ERROR" ]; then
+        local MESSAGE=$(echo "$SHELL_INFO" | jq -r '.message // "Unknown error"')
         echo "Error: ${ERROR}"
-        echo "$(echo "$SHELL_INFO" | jq -r '.message // ""')"
+        echo "${MESSAGE}"
         return 1
       fi
       
-      # Get connection mode
-      local MODE=$(echo "$SHELL_INFO" | jq -r '.mode // "console"')
-      local SSH_AVAILABLE=$(echo "$SHELL_INFO" | jq -r '.ssh_available // false')
+      local IP=$(echo "$SHELL_INFO" | jq -r '.ip')
+      local KEY_PATH=$(echo "$SHELL_INFO" | jq -r '.ssh_key_path')
+      local USER=$(echo "$SHELL_INFO" | jq -r '.ssh_user // "root"')
+      local PORT=$(echo "$SHELL_INFO" | jq -r '.ssh_port // 22')
       
-      if [ "$SSH_AVAILABLE" = "true" ]; then
-        # SSH mode
-        local IP=$(echo "$SHELL_INFO" | jq -r '.ip')
-        local KEY_PATH=$(echo "$SHELL_INFO" | jq -r '.ssh_key_path')
-        local USER=$(echo "$SHELL_INFO" | jq -r '.ssh_user // "root"')
-        local PORT=$(echo "$SHELL_INFO" | jq -r '.ssh_port // 22')
-        
-        echo "Connecting via SSH to ${USER} @${IP}..."
-        echo "Press Ctrl-D or type 'exit' to disconnect."
-        echo ""
-        
-        docker compose exec -it $SERVICE ssh \
-          -i "$KEY_PATH" \
-          -o StrictHostKeyChecking=no \
-          -o UserKnownHostsFile=/dev/null \
-          -o LogLevel=ERROR \
-          -p "$PORT" \
-          "${USER} @${IP}"
-      else
-        # Console mode fallback
-        local CONSOLE_PORT=$(echo "$SHELL_INFO" | jq -r '.console_port // 4001')
-        
-        echo "Connecting to container ${id} shell..."
-        echo "Press Ctrl-C to disconnect."
-        echo ""
-        
-        # Clear buffer so we don't see boot logs
-        docker compose exec -T $SERVICE curl -sf -X POST "${API}/containers/${id}/console/clear" > /dev/null 2>&1 || true
-        
-        # Spawn shell (sends newlines to get fresh prompt)  
-        docker compose exec -T $SERVICE curl -sf -X POST "${API}/containers/${id}/shell/spawn" > /dev/null
-        
-        # Small delay for prompt
-        sleep 0.3
-        
-        # Use bash /dev/tcp for proper bidirectional I/O with raw terminal
-        docker compose exec -it $SERVICE bash -c '
-          # Save terminal settings
-          OLD_STTY=$(stty -g)
-          
-          # Set terminal to raw mode (pass through all characters)
-          stty raw -echo
-          
-          # Restore terminal on exit
-          trap "stty $OLD_STTY" EXIT INT TERM
-          
-          # Open bidirectional TCP connection
-          exec 3<>/dev/tcp/localhost/'"${CONSOLE_PORT}"'
-          
-          # Send ATTACH command (need \r\n for line ending)
-          printf "ATTACH:'"${id}"'\r\n" >&3
-          
-          # Background: TCP to stdout
-          cat <&3 &
-          READ_PID=$!
-          
-          # Update trap to also kill reader
-          trap "kill $READ_PID 2>/dev/null; stty $OLD_STTY; exec 3>&-" EXIT INT TERM
-          
-          # Foreground: stdin to TCP
-          cat >&3
-        '
-      fi
+      # Wait for SSH to be ready (container needs time to boot and install SSH)
+      # if ! wait_for_ssh "$id" 60; then
+      #   echo ""
+      #   echo "Error: SSH did not become ready within 60 seconds"
+      #   echo "The container may still be installing SSH. Check logs:"
+      #   echo "  zypi logs ${id}"
+      #   return 1
+      # fi
+      
+      echo "Connecting via SSH to ${USER}@${IP}..."
+      echo "Press Ctrl-D or type 'exit' to disconnect."
+      echo ""
+      
+      docker compose exec -it $SERVICE ssh \
+        -i "$KEY_PATH" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR \
+        -o ConnectTimeout=10 \
+        -p "$PORT" \
+        "${USER}@${IP}"
       ;;
      
     status)

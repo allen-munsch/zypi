@@ -1,6 +1,6 @@
 # Zypi
 
-Zypi is a simple container runtime written in Elixir with two execution backends: traditional Linux containers and microVMs.
+Zypi is a simple container runtime written in Elixir for firecracker microVMs
 
 ## Quick Start
 
@@ -9,17 +9,20 @@ Zypi is a simple container runtime written in Elixir with two execution backends
 git clone https://github.com/allen-munsch/zypi.git
 cd zypi
 
-# OR for a cgroups version
+# OR for an older cgroups version
 # git checkout crun-cgroups
 ```
 
 # Usage
 
 ```
+# please note, you'll need to compile a newer vmlinux if you want shell support
 docker compse build
 docker compose up
 
 source tools/zypi-cli.sh
+
+
 ./build_push_start.sh
 
 # There are 2 examples that run, base alpine, and a base alpine python

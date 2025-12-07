@@ -15,7 +15,7 @@ log_level =
     "info" -> :info
     "warn" -> :warn
     "error" -> :error
-    other -> :info  # default fallback
+    _other -> :info  # default fallback
   end
 
 config :logger,

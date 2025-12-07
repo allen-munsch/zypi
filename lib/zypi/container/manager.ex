@@ -24,26 +24,26 @@ defmodule Zypi.Container.Manager do
   def list, do: Containers.list()
 
   @doc """
-  Get shell connection info for a container.
-  Returns SSH details if available, otherwise console fallback.
+  Get SSH connection info for shell access.
   """
   def get_shell_info(container_id) do
     case Containers.get(container_id) do
       {:ok, container} ->
         case container.status do
           :running ->
-            ssh_info = check_ssh_availability(container)
+            ssh_key = Application.get_env(:zypi, :ssh_key_path)
             
-            {:ok, %{
-              container_id: container_id,
-              ip: format_ip(container.ip),
-              mode: ssh_info.mode,
-              ssh_available: ssh_info.available,
-              ssh_key_path: ssh_info.key_path,
-              ssh_user: "root",
-              ssh_port: 22,
-              console_port: Zypi.API.ConsoleSocket.get_port()
-            }}
+            if ssh_key && container.ip do
+              {:ok, %{
+                container_id: container_id,
+                ip: format_ip(container.ip),
+                ssh_key_path: ssh_key,
+                ssh_user: "root",
+                ssh_port: 22
+              }}
+            else
+              {:error, :ssh_not_configured}
+            end
             
           status ->
             {:error, {:not_running, status}}
@@ -54,24 +54,21 @@ defmodule Zypi.Container.Manager do
     end
   end
 
-  defp check_ssh_availability(container) do
-    ssh_key = Application.get_env(:zypi, :ssh_key_path)
-    ip = format_ip(container.ip)
-    
-    # Check if SSH port is reachable
-    ssh_reachable = case :gen_tcp.connect(String.to_charlist(ip), 22, [], 500) do
-      {:ok, socket} ->
-        :gen_tcp.close(socket)
-        true
-      {:error, _} ->
+  @doc """
+  Check if SSH is ready on the container.
+  """
+  def ssh_ready?(container_id) do
+    case get_shell_info(container_id) do
+      {:ok, %{ip: ip}} ->
+        case :gen_tcp.connect(String.to_charlist(ip), 22, [], 2000) do
+          {:ok, socket} ->
+            :gen_tcp.close(socket)
+            true
+          {:error, _} ->
+            false
+        end
+      _ ->
         false
-    end
-    
-    cond do
-      ssh_key && ssh_reachable ->
-        %{mode: "ssh", available: true, key_path: ssh_key}
-      true ->
-        %{mode: "console", available: false, key_path: nil}
     end
   end
 
@@ -84,8 +81,54 @@ defmodule Zypi.Container.Manager do
 
   @impl true
   def init(_opts) do
+    # Clean up any orphaned consoles from previous Manager instances
+    cleanup_orphaned_consoles()
+    
     Logger.info("Container.Manager initialized (Firecracker runtime)")
     {:ok, %__MODULE__{}}
+  end
+
+  defp cleanup_orphaned_consoles do
+    # Get all containers from store
+    containers = Zypi.Store.Containers.list()
+    container_ids = Enum.map(containers, & &1.id) |> MapSet.new()
+    
+    # Find all globally registered consoles
+    # :global.registered_names() returns all global names
+    :global.registered_names()
+    |> Enum.filter(fn
+      {:zypi_console, _vm_id} -> true
+      _ -> false
+    end)
+    |> Enum.each(fn {:zypi_console, vm_id} = name ->
+      # If container doesn't exist or isn't running, stop the console
+      container = Enum.find(containers, & &1.id == vm_id)
+      
+      should_stop = cond do
+        is_nil(container) -> 
+          Logger.debug("Cleaning up orphaned console for non-existent container #{vm_id}")
+          true
+        container.status not in [:running, :starting] ->
+          Logger.debug("Cleaning up console for non-running container #{vm_id} (status: #{container.status})")
+          true
+        true ->
+          false
+      end
+      
+      if should_stop do
+        case :global.whereis_name(name) do
+          :undefined -> :ok
+          pid -> 
+            try do
+              GenServer.stop(pid, :normal, 1000)
+            catch
+              _, _ -> :ok
+            end
+        end
+      end
+    end)
+  rescue
+    e -> Logger.warning("Error during console cleanup: #{inspect(e)}")
   end
 
   @impl true
@@ -291,7 +334,7 @@ defmodule Zypi.Container.Manager do
     image_ref = params[:image]
     start_us = System.monotonic_time(:microsecond)
 
-    base_image = DevicePool.image_path(image_ref)
+    _base_image = DevicePool.image_path(image_ref)
 
     # Ensure image is ready
     result = case DevicePool.acquire(image_ref) do
