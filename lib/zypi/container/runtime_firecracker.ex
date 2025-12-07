@@ -133,18 +133,10 @@ defmodule Zypi.Container.RuntimeFirecracker do
   end
 
   def configure_vm(socket_path, container, tap) do
-    # Use the DevicePool-created image (which has base rootfs + OCI layers + openssh)
-    image_id = Base.url_encode64(container.image, padding: false)
-    data_dir = Application.get_env(:zypi, :data_dir, "/var/lib/zypi")
-    rootfs_path = Path.join([data_dir, "devices", "#{image_id}.img"])
+    # The rootfs is now expected to be a TCMU device path from the snapshot
+    rootfs_path = container.rootfs
 
-    Logger.info("RuntimeFirecracker: Using rootfs: #{rootfs_path}")
-
-    unless File.exists?(rootfs_path) do
-      Logger.error("RuntimeFirecracker: Rootfs not found at #{rootfs_path}")
-      throw({:error, :rootfs_not_found})
-    end
-
+    Logger.info("RuntimeFirecracker: Using rootfs device: #{rootfs_path}")
     Logger.info("RuntimeFirecracker: Using kernel: #{@kernel_path}")
 
     vm_path = Path.join(@vm_dir, container.id)

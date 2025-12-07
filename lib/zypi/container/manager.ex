@@ -334,66 +334,30 @@ defmodule Zypi.Container.Manager do
     image_ref = params[:image]
     start_us = System.monotonic_time(:microsecond)
 
-    _base_image = DevicePool.image_path(image_ref)
+    # No need to acquire from DevicePool or wait for warming, SnapshotPool will get Delta config
+    case Zypi.Pool.SnapshotPool.create_snapshot(image_ref, container_id) do
+      {:ok, snapshot_device} ->
+        with {:ok, ip} <- IPPool.acquire() do
+          container = %Container{
+            id: container_id,
+            image: image_ref,
+            rootfs: snapshot_device,
+            ip: ip,
+            status: :created,
+            created_at: DateTime.utc_now(),
+            resources: params[:resources] || %{cpu: 1, memory_mb: 128},
+            metadata: params[:metadata] || %{}
+          }
 
-    # Ensure image is ready
-    result = case DevicePool.acquire(image_ref) do
-      {:ok, path} -> {:ok, path}
-      {:error, :pool_empty} ->
-        Logger.info("Image not ready, warming...")
-        DevicePool.warm(image_ref)
-        # Wait for warming (with timeout)
-        wait_for_image(image_ref, 30_000)
-    end
-
-    case result do
-      {:ok, base_path} ->
-        # Create snapshot for this container
-        case Zypi.Pool.SnapshotPool.create_snapshot(image_ref, container_id, base_path) do
-          {:ok, snapshot_device} ->
-            with {:ok, ip} <- IPPool.acquire() do
-              container = %Container{
-                id: container_id,
-                image: image_ref,
-                rootfs: snapshot_device,
-                ip: ip,
-                status: :created,
-                created_at: DateTime.utc_now(),
-                resources: params[:resources] || %{cpu: 1, memory_mb: 128},
-                metadata: params[:metadata] || %{}
-              }
-
-              Containers.put(container)
-              elapsed = System.monotonic_time(:microsecond) - start_us
-              Logger.info("Container #{container_id} created in #{elapsed}µs")
-              {:ok, container}
-            end
-
-          {:error, reason} ->
-            Logger.error("Failed to create snapshot: #{inspect(reason)}")
-            {:error, reason}
+          Containers.put(container)
+          elapsed = System.monotonic_time(:microsecond) - start_us
+          Logger.info("Container #{container_id} created in #{elapsed}µs")
+          {:ok, container}
         end
 
-      {:error, :timeout} ->
-        {:error, :image_not_ready}
-    end
-  end
-
-  defp wait_for_image(image_ref, timeout) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_wait_for_image(image_ref, deadline)
-  end
-
-  defp do_wait_for_image(image_ref, deadline) do
-    if System.monotonic_time(:millisecond) > deadline do
-      {:error, :timeout}
-    else
-      case DevicePool.acquire(image_ref) do
-        {:ok, path} -> {:ok, path}
-        {:error, :pool_empty} ->
-          Process.sleep(500)
-          do_wait_for_image(image_ref, deadline)
-      end
+      {:error, reason} ->
+        Logger.error("Failed to create snapshot: #{inspect(reason)}")
+        {:error, reason}
     end
   end
 
