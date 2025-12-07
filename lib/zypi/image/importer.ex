@@ -31,8 +31,18 @@ defmodule Zypi.Image.Importer do
          # Build a custom base rootfs with injected config
          {:ok, custom_rootfs_path} <- BaseRootfs.build_base_with_oci_config(container_config),
 
-         # Convert custom base + original tar into overlaybd layers
-         {:ok, config_json} <- run_overlaybd_apply([custom_rootfs_path, tar_path], work_dir),
+         # Create overlaybd config file
+         config_path = Path.join(work_dir, "overlaybd.json"),
+         :ok <- create_overlaybd_config(config_path, work_dir),
+
+         # Apply base rootfs first with mkfs
+         {:ok, _} <- run_overlaybd_apply(custom_rootfs_path, config_path, mkfs: true),
+
+         # Apply Docker image tar on top
+         {:ok, _} <- run_overlaybd_apply(tar_path, config_path),
+
+         # Read final config
+         {:ok, config_json} <- File.read(config_path),
          overlaybd_config = Jason.decode!(config_json),
 
          # Store layers and create delta
@@ -49,11 +59,20 @@ defmodule Zypi.Image.Importer do
     end
   end
 
-  defp run_overlaybd_apply(input_paths, output_dir) do
-    args = Enum.flat_map(input_paths, fn path -> ["--input", path] end) ++ ["--output", output_dir, "--mkfs"]
-    case System.cmd("overlaybd-apply", args) do
-      {config_json, 0} -> {:ok, config_json}
-      {err, code} -> {:error, {:overlaybd_apply_failed, code, err}}
+  defp run_overlaybd_apply(tar_path, config_path, opts \\ []) do
+    case System.find_executable("overlaybd-apply") do
+      nil ->
+        {:error, {:binary_not_found, "overlaybd-apply"}}
+      exe_path ->
+        args = [tar_path, config_path]
+        args = if Keyword.get(opts, :mkfs, false), do: args ++ ["--mkfs"], else: args
+        args = if Keyword.get(opts, :verbose, false), do: args ++ ["--verbose"], else: args
+        
+        Logger.debug("Running: overlaybd-apply #{Enum.join(args, " ")}")
+        case System.cmd(exe_path, args, stderr_to_stdout: true) do
+          {output, 0} -> {:ok, output}
+          {err, code} -> {:error, {:overlaybd_apply_failed, code, err}}
+        end
     end
   end
 
@@ -205,6 +224,14 @@ defmodule Zypi.Image.Importer do
   end
 
   # The rest of the functions are provided in the error message, so we can use them.
+
+  defp create_overlaybd_config(config_path, work_dir) do
+    config = %{
+      "lowers" => [],
+      "resultFile" => Path.join(work_dir, "result.obd")
+    }
+    File.write(config_path, Jason.encode!(config))
+  end
 
   defp create_delta(image_ref, work_dir, overlaybd_config, container_config) do
     dest_dir = layer_dir(image_ref)

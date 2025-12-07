@@ -16,17 +16,15 @@ defmodule Zypi.Image.BaseRootfs do
     File.mkdir_p!(mount_point)
 
     try do
-      # Copy base rootfs content
       copy_base_rootfs(base_rootfs_path, temp_rootfs)
-
-      # Inject init script and config
       inject_vm_init(temp_rootfs, container_config)
-      
-      # Create an ext4 image from the customized rootfs
       output_image_path = Path.join(temp_dir, "custom_rootfs.ext4")
       create_ext4_image(temp_rootfs, output_image_path)
 
-      {:ok, output_image_path}
+      # Move file to stable location before cleanup
+      final_path = "/tmp/zypi-rootfs-#{System.unique_integer([:positive])}.ext4"
+      File.rename!(output_image_path, final_path)
+      {:ok, final_path}
     after
       File.rm_rf!(temp_dir)
     end
@@ -45,9 +43,9 @@ defmodule Zypi.Image.BaseRootfs do
   defp copy_base_rootfs(base_path, dest_dir) do
     temp_mount = "/tmp/mnt-#{System.unique_integer([:positive])}"
     File.mkdir_p!(temp_mount)
-    
+
     {:ok, loop_dev} = losetup(base_path)
-    
+
     case System.cmd("mount", ["-o", "ro", loop_dev, temp_mount]) do
       {_, 0} ->
         System.cmd("cp", ["-a", "#{temp_mount}/.", dest_dir])
@@ -72,7 +70,7 @@ defmodule Zypi.Image.BaseRootfs do
     System.cmd("truncate", ["-s", "#{size_mb}M", image_path])
     System.cmd("mkfs.ext4", ["-F", "-d", source_dir, image_path])
   end
-  
+
   defp inject_vm_init(rootfs_dir, config) do
     ~w[dev proc sys tmp run etc var/run sbin etc/ssh etc/zypi]
     |> Enum.each(&File.mkdir_p!(Path.join(rootfs_dir, &1)))
@@ -164,7 +162,7 @@ defmodule Zypi.Image.BaseRootfs do
     hostname zypi-container 2>/dev/null || true
     mkdir -p /var/log
     touch /var/log/lastlog
-    
+
     ip link set lo up 2>/dev/null || true
     ip link set eth0 up 2>/dev/null || true
 
