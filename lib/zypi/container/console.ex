@@ -8,12 +8,12 @@ defmodule Zypi.Container.Console do
   """
   def start_link(vm_id, fc_port, opts \\ []) do
     opts = Keyword.delete(opts, :name)
-    
+
     case GenServer.whereis(via_tuple(vm_id)) do
       nil ->
         # No existing process, start fresh
         GenServer.start_link(__MODULE__, {vm_id, fc_port}, [name: via_tuple(vm_id)] ++ opts)
-        
+
       existing_pid ->
         # Process exists - check if it's alive
         if Process.alive?(existing_pid) do
@@ -26,6 +26,7 @@ defmodule Zypi.Container.Console do
         end
     end
   end
+
   @doc """
   Check if a console exists for the given VM.
   """
@@ -87,45 +88,42 @@ defmodule Zypi.Container.Console do
   """
   def forward_output(vm_id, data) do
     case GenServer.whereis(via_tuple(vm_id)) do
-      nil -> 
+      nil ->
         # Console not running yet, data will be lost
         # This is fine during early boot before console starts
         :ok
-      _pid -> 
+      _pid ->
         GenServer.cast(via_tuple(vm_id), {:vm_output_from_manager, data})
     end
   end
 
   @doc """
-  Stops the console GenServer.
+  Stops the console GenServer. Safe to call even if console doesn't exist.
   """
-   @doc """
-Stops the console GenServer. Safe to call even if console doesn't exist.
-"""
-def stop(vm_id) do
-  case GenServer.whereis(via_tuple(vm_id)) do
-    nil -> 
-      :ok
-    pid -> 
-      try do
-        GenServer.stop(pid, :normal, 5000)
-      catch
-        :exit, {:noproc, _} -> :ok
-        :exit, {:normal, _} -> :ok
-        :exit, _ -> :ok
-      end
+  def stop(vm_id) do
+    case GenServer.whereis(via_tuple(vm_id)) do
+      nil ->
+        :ok
+      pid ->
+        try do
+          GenServer.stop(pid, :normal, 5000)
+        catch
+          :exit, {:noproc, _} -> :ok
+          :exit, {:normal, _} -> :ok
+          :exit, _ -> :ok
+        end
+    end
   end
-end
 
- @doc """
-Restarts the console with a new Firecracker port.
-Stops existing console if present, then starts fresh.
-"""
-def restart(vm_id, fc_port) do
-  stop(vm_id)
-  Process.sleep(50)  # Allow cleanup to complete
-  start_link(vm_id, fc_port)
-end
+  @doc """
+  Restarts the console with a new Firecracker port.
+  Stops existing console if present, then starts fresh.
+  """
+  def restart(vm_id, fc_port) do
+    stop(vm_id)
+    Process.sleep(50)  # Allow cleanup to complete
+    start_link(vm_id, fc_port)
+  end
 
   @doc """
   Clear the console buffer.
@@ -189,7 +187,7 @@ end
     for client <- state.clients do
       send(client, {:console_output, data})
     end
-    
+
     {:noreply, %{state | buffer: buffer}}
   end
 

@@ -16,7 +16,13 @@ cd zypi
 # Usage
 
 ```
-# please note, you'll need to compile a newer vmlinux if you want shell support
+sudo modprobe target_core_user
+sudo modprobe tcm_loop
+
+# NOTE 
+# you'll need to compile a newer vmlinux if you want shell support
+# See: tools/build_vmlinux.sh
+
 docker compse build
 docker compose up
 

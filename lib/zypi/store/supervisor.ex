@@ -1,8 +1,4 @@
 defmodule Zypi.Store.Supervisor do
-  @moduledoc """
-  Supervises ETS table owners.
-  """
-
   use Supervisor
 
   def start_link(opts) do

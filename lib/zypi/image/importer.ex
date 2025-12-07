@@ -1,129 +1,122 @@
 defmodule Zypi.Image.Importer do
-  @moduledoc """
-  Imports Docker tar archives into Zypi image store.
-  Extracts layers, parses OCI config, stores container metadata.
-  """
+  use GenServer
   require Logger
-  import Bitwise  # We need this for the &&& operator
 
   @data_dir Application.compile_env(:zypi, :data_dir, "/var/lib/zypi")
+  @base_dir "/opt/zypi/rootfs"
+  @images_dir Path.join( @data_dir, "images")
 
   defmodule ContainerConfig do
     @derive Jason.Encoder
     defstruct [:cmd, :entrypoint, :env, :workdir, :user]
   end
 
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+
   def import_tar(ref, tar_data) do
-    Logger.info("Importer: Starting import for #{ref}")
-
-    with {:ok, work_dir} <- mktemp_workdir(),
-         {:ok, extracted_dir} <- extract_tar(tar_data, work_dir),
-         {:ok, docker_manifest, oci_config} <- parse_docker_tar(extracted_dir),
-         {:ok, layers, total_size} <- process_layers(ref, extracted_dir, docker_manifest),
-         container_config = extract_container_config(oci_config),
-         {:ok, manifest} <- create_delta(ref, layers, total_size, container_config) do
-
-      # DEBUG: List the rootfs contents
-      # We don't have the rootfs path in the manifest, so we need to get it from the delta?
-      # But the delta is stored in the delta_path, and the rootfs is built by the overlaybd.
-      # We are not building the rootfs in the importer. The rootfs is built when the container is created.
-      # So we cannot check for /sbin/init here because the rootfs doesn't exist yet.
-
-      # Instead, we can check the layers? But the layers are tar files.
-
-      # We'll just log the layers and the config.
-
-      Logger.info("Imported #{ref}: #{length(layers)} layers, #{total_size} bytes")
-
-      # We don't have a rootfs path to check, so we skip the rootfs checks.
-
-      {:ok, manifest}
-    else
-      error ->
-        Logger.error("Import failed: #{inspect(error)}")
-        error
-    end
-  end
-
-  defp mktemp_workdir() do
-    work_dir = Path.join(System.tmp_dir!(), "zypi-import-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(work_dir)
-    {:ok, work_dir}
-  end
-
-  defp extract_tar(tar_data, work_dir) do
-    tar_path = Path.join(work_dir, "image.tar")
-    File.write!(tar_path, tar_data)
-    case System.cmd("tar", ["xf", tar_path, "-C", work_dir]) do
-      {_, 0} -> {:ok, work_dir}
-      {output, code} -> {:error, {:tar_failed, code, output}}
-    end
-  end
-
-  # The rest of the functions are provided in the error message, so we can use them.
-
-  defp ensure_success({_output, 0}), do: :ok
-  defp ensure_success({output, exit_code}), do: {:error, {:cmd_failed, exit_code, output}}
-
-  defp stream_body_to_file(conn, path) do
-    {:ok, file} = File.open(path, [:write, :binary])
-    result = do_stream(conn, file)
-    File.close(file)
-    result
-  end
-
-  defp do_stream(conn, file) do
-    case Plug.Conn.read_body(conn, length: 1_000_000) do
-      {:ok, body, conn} ->
-        IO.binwrite(file, body)
-        {:ok, conn}
-      {:more, body, conn} ->
-        IO.binwrite(file, body)
-        do_stream(conn, file)
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp parse_docker_tar(extract_dir) do
-    manifest_path = Path.join(extract_dir, "manifest.json")
-    {:ok, json} = File.read(manifest_path)
-    [docker_manifest] = Jason.decode!(json)
-
-    config_path = Path.join(extract_dir, docker_manifest["Config"])
-    {:ok, config_json} = File.read(config_path)
-    oci_config = Jason.decode!(config_json)
-
-    {:ok, docker_manifest, oci_config}
-  end
-
-  defp process_layers(image_ref, extract_dir, docker_manifest) do
-    dest_dir = layer_dir(image_ref)
-    File.mkdir_p!(dest_dir)
-
-    layer_paths = docker_manifest["Layers"] || []
-
-    {layers, total} = Enum.map_reduce(layer_paths, 0, fn layer_path, acc ->
-      src = Path.join(extract_dir, layer_path)
-      {hash_out, 0} = System.cmd("sha256sum", [src])
-      [hash | _] = String.split(hash_out)
-      digest = "sha256:#{hash}"
-      dest = Path.join(dest_dir, digest)
-
-      case System.cmd("file", ["-b", src], stderr_to_stdout: true) do
-        {out, 0} ->
-          if String.contains?(out, "gzip") do
-            {_, 0} = System.cmd("sh", ["-c", "gunzip -c '#{src}' > '#{dest}'"])
-          else
-            File.cp!(src, dest)
-          end
-      end
-
-      size = File.stat!(dest).size
-      {%{digest: digest, size: size}, acc + size}
+    Task.Supervisor.async_nolink(Zypi.ImporterTasks, fn ->
+      do_import(ref, tar_data)
     end)
+    |> Task.await(300_000)
+  end
 
-    {:ok, layers, total}
+  @impl true
+  def init(_opts) do
+    File.mkdir_p!( @images_dir)
+    {:ok, %{}}
+  end
+
+  @impl true
+  def handle_call({:import, ref, tar_data}, _from, state) do
+    result = do_import(ref, tar_data)
+    {:reply, result, state}
+  end
+
+  defp do_import(ref, tar_data) do
+    Logger.info("Importer: Starting import for #{ref}")
+    work_dir = Path.join( @data_dir, "imports/#{System.unique_integer([:positive])}")
+    File.mkdir_p!(work_dir)
+
+    try do
+      tar_path = Path.join(work_dir, "image.tar")
+      File.write!(tar_path, tar_data)
+
+      with {:ok, image_dir} <- extract_tar(tar_path, Path.join(work_dir, "extracted")),
+           {:ok, oci_config} <- parse_oci_config(image_dir),
+           container_config = extract_container_config(oci_config),
+           {:ok, docker_layers} <- get_docker_layers(image_dir),
+           {:ok, base_ext4} <- find_base_ext4(),
+           {:ok, ext4_path} <- build_ext4_image(ref, base_ext4, docker_layers, Map.from_struct(container_config)) do
+        size_bytes = File.stat!(ext4_path).size
+        Zypi.Pool.ImageStore.put_image(ref, ext4_path, Map.from_struct(container_config), size_bytes)
+        Zypi.Store.Images.put(%Zypi.Store.Images.Image{ref: ref, status: :ready, device: ext4_path, size_bytes: size_bytes, pulled_at: DateTime.utc_now()})
+        Logger.info("Import complete: #{ref} (#{size_bytes} bytes)")
+        {:ok, %{ref: ref, ext4_path: ext4_path, size_bytes: size_bytes, container_config: container_config}}
+      end
+    after
+      File.rm_rf!(work_dir)
+    end
+  end
+
+  defp build_ext4_image(ref, base_ext4, docker_layers, container_config) do
+    layer_hash = hash_layers(docker_layers)
+    cached_path = Path.join(@images_dir, "cache-#{layer_hash}.ext4")
+
+    if File.exists?(cached_path) do
+      Logger.info("Using cached image for layer hash #{layer_hash}")
+      encoded = Base.url_encode64(ref, padding: false)
+      ext4_path = Path.join(@images_dir, "#{encoded}.ext4")
+      {_, 0} = System.cmd("cp", ["--reflink=auto", "--sparse=always", cached_path, ext4_path], stderr_to_stdout: true)
+      :ok = inject_init(ext4_path, container_config)
+      {:ok, ext4_path}
+    else
+      Logger.info("Building new image, will cache as #{layer_hash}")
+      {:ok, ext4_path} = do_build_ext4_image(ref, base_ext4, docker_layers, container_config)
+      System.cmd("cp", ["--reflink=auto", "--sparse=always", ext4_path, cached_path], stderr_to_stdout: true)
+      {:ok, ext4_path}
+    end
+  end
+
+  defp hash_layers(docker_layers) do
+    docker_layers
+    |> Enum.map(&Path.basename/1)
+    |> Enum.sort()
+    |> Enum.join(":")
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+    |> binary_part(0, 16)
+  end
+
+  defp do_build_ext4_image(ref, base_ext4, docker_layers, container_config) do
+    encoded = Base.url_encode64(ref, padding: false)
+    ext4_path = Path.join(@images_dir, "#{encoded}.ext4")
+    {_, 0} = System.cmd("cp", ["--reflink=auto", "--sparse=always", base_ext4, ext4_path], stderr_to_stdout: true)
+    Enum.each(docker_layers, fn layer ->
+      Logger.info("Applying layer: #{Path.basename(layer)}")
+      {_, 0} = System.cmd("overlaybd-apply", [layer, ext4_path, "--raw"], stderr_to_stdout: true)
+    end)
+    :ok = inject_init(ext4_path, container_config)
+    {:ok, ext4_path}
+  end
+
+  defp extract_tar(tar_path, dest) do
+    File.mkdir_p!(dest)
+    case System.cmd("tar", ["xf", tar_path, "-C", dest], stderr_to_stdout: true) do
+      {_, 0} -> {:ok, dest}
+      {err, code} -> {:error, {:tar_extract_failed, code, err}}
+    end
+  end
+
+  defp parse_oci_config(image_dir) do
+    manifest_path = Path.join(image_dir, "manifest.json")
+    with {:ok, data} <- File.read(manifest_path),
+         [manifest | _] <- Jason.decode!(data),
+         config_file when not is_nil(config_file) <- manifest["Config"],
+         {:ok, config_data} <- File.read(Path.join(image_dir, config_file)) do
+      {:ok, Jason.decode!(config_data)}
+    else
+      _ -> {:error, :config_parse_failed}
+    end
   end
 
   defp extract_container_config(oci_config) do
@@ -137,37 +130,136 @@ defmodule Zypi.Image.Importer do
     }
   end
 
-  defp create_delta(image_ref, layers, total_size, container_config) do
-    path = delta_path(image_ref)
-    File.mkdir_p!(path)
-
-    lowers = Enum.map(layers, fn l -> %{"digest" => l.digest, "size" => l.size} end)
-
-    overlaybd_config = %{
-      "repoBlobUrl" => "file://#{layer_dir(image_ref)}",
-      "lowers" => lowers,
-      "resultFile" => "/tmp/zypi-#{Base.url_encode64(image_ref, padding: false)}"
-    }
-
-    manifest = %{
-      ref: image_ref,
-      layers: layers,
-      size_bytes: total_size,
-      created_at: DateTime.utc_now(),
-      overlaybd_config: overlaybd_config,
-      container_config: Map.from_struct(container_config)
-    }
-
-    File.write!(Path.join(path, "config.overlaybd.json"), Jason.encode!(overlaybd_config))
-    File.write!(Path.join(path, "manifest.json"), Jason.encode!(manifest))
-    File.write!(Path.join(path, "container_config.json"), Jason.encode!(container_config))
-
-    Logger.info("Imported #{image_ref}: #{length(layers)} layers, #{total_size} bytes")
-    Zypi.Store.Images.put(%Zypi.Store.Images.Image{ref: image_ref, status: :available})
-
-    {:ok, manifest}
+  defp get_docker_layers(image_dir) do
+    manifest_path = Path.join(image_dir, "manifest.json")
+    with {:ok, data} <- File.read(manifest_path),
+         [manifest | _] <- Jason.decode!(data) do
+      layers = Enum.map(manifest["Layers"] || [], &Path.join(image_dir, &1))
+      {:ok, layers}
+    else
+      _ -> {:error, :layers_parse_failed}
+    end
   end
 
-  defp layer_dir(ref), do: Path.join([ @data_dir, "layers", Base.url_encode64(ref, padding: false)])
-  defp delta_path(ref), do: Path.join([ @data_dir, "deltas", Base.url_encode64(ref, padding: false)])
+  defp find_base_ext4 do
+    case File.ls(@base_dir) do
+      {:ok, files} ->
+        case Enum.find(files, &String.ends_with?(&1, ".ext4")) do
+          nil -> {:error, :no_base_ext4}
+          file -> {:ok, Path.join(@base_dir, file)}
+        end
+      {:error, reason} -> {:error, {:base_dir_error, reason}}
+    end
+  end
+
+  defp inject_init(ext4_path, container_config) do
+    mount_point = "/tmp/zypi-mount-#{System.unique_integer([:positive])}"
+    File.mkdir_p!(mount_point)
+
+    try do
+      {_, 0} = System.cmd("mount", ["-o", "loop", ext4_path, mount_point], stderr_to_stdout: true)
+
+      # Create directories
+      Enum.each(~w[sbin etc/zypi root/.ssh], fn dir ->
+        File.mkdir_p!(Path.join(mount_point, dir))
+      end)
+
+      # Nuke Ubuntu's dynamic MOTD system
+      File.write!(Path.join(mount_point, "etc/legal"), "")
+      update_motd_dir = Path.join(mount_point, "etc/update-motd.d")
+      File.rm_rf(update_motd_dir)
+      File.mkdir_p!(update_motd_dir)
+
+      # Write init script
+      init_script = generate_init_script(container_config)
+      init_path = Path.join(mount_point, "sbin/zypi-init")
+      File.write!(init_path, init_script)
+      File.chmod!(init_path, 0o755)
+
+      # Symlink /sbin/init -> zypi-init
+      sbin_init = Path.join(mount_point, "sbin/init")
+      File.rm(sbin_init)
+      File.ln_s!("zypi-init", sbin_init)
+
+      # Copy SSH authorized keys
+      ssh_key_path = Application.get_env(:zypi, :ssh_key_path)
+      if ssh_key_path && File.exists?("#{ssh_key_path}.pub") do
+        pub_key = File.read!("#{ssh_key_path}.pub")
+        auth_keys = Path.join(mount_point, "root/.ssh/authorized_keys")
+        File.write!(auth_keys, pub_key)
+        File.chmod!(auth_keys, 0o600)
+      end
+
+      # Write container config
+      config_path = Path.join(mount_point, "etc/zypi/config.json")
+      File.write!(config_path, Jason.encode!(container_config))
+
+      :ok
+    after
+      System.cmd("umount", [mount_point], stderr_to_stdout: true)
+      File.rmdir(mount_point)
+    end
+  end
+
+  defp generate_init_script(config) do
+    entrypoint = Map.get(config, :entrypoint) || []
+    cmd = Map.get(config, :cmd) || []
+    env = Map.get(config, :env) || []
+    workdir = Map.get(config, :workdir) || "/"
+
+    env_exports = env |> Enum.map(&"export #{&1}") |> Enum.join("\n")
+
+    main_cmd = case {entrypoint, cmd} do
+      {[], []} -> nil
+      {[], c} -> shell_escape(c)
+      {e, []} -> shell_escape(e)
+      {e, c} -> shell_escape(e ++ c)
+    end
+
+    main_section = if main_cmd, do: "cd #{workdir}\n(#{main_cmd}) &", else: "cd #{workdir}"
+
+    """
+    #!/bin/sh
+    touch /var/log/lastlog
+    mount -t proc proc /proc 2>/dev/null
+    mount -t sysfs sysfs /sys 2>/dev/null
+    mount -t devtmpfs devtmpfs /dev 2>/dev/null
+    mkdir -p /dev/pts /dev/shm /run/sshd /var/log
+    mount -t devpts devpts /dev/pts 2>/dev/null
+    mount -t tmpfs tmpfs /run 2>/dev/null
+    ip link set lo up 2>/dev/null
+    ip link set eth0 up 2>/dev/null
+    export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    export HOME=/root
+    rm -rf /etc/update-motd.d/* 2>/dev/null
+    cat > /etc/motd << 'MOTD'
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║   ███████╗██╗   ██╗██████╗ ██╗                                ║
+║   ╚══███╔╝╚██╗ ██╔╝██╔══██╗██║                                ║
+║     ███╔╝  ╚████╔╝ ██████╔╝██║                                ║
+║    ███╔╝    ╚██╔╝  ██╔═══╝ ██║                                ║
+║   ███████╗   ██║   ██║     ██║                                ║
+║   ╚══════╝   ╚═╝   ╚═╝     ╚═╝                                ║
+║                                                               ║
+║   ⚡ Firecracker microVM · Sub-second boot · CoW snapshots     ║
+║                                                               ║
+╚═══════════════════════════════════════════════════════════════╝
+
+MOTD
+
+    #{env_exports}
+    if [ -x /usr/sbin/sshd ]; then
+      mkdir -p /run/sshd
+      [ ! -f /etc/ssh/ssh_host_rsa_key ] && ssh-keygen -A 2>/dev/null
+      /usr/sbin/sshd -D -e &
+    fi
+    #{main_section}
+    while true; do sleep 60; done
+    """
+  end
+
+  defp shell_escape(args) when is_list(args) do
+    Enum.map_join(args, " ", &("'" <> String.replace(&1, "'", "'\\''") <> "'"))
+  end
 end

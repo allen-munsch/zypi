@@ -8,10 +8,10 @@ defmodule Zypi.Pool.Supervisor do
   @impl true
   def init(_opts) do
     children = [
-      Zypi.Pool.SnapshotPool,
       Zypi.Pool.IPPool,
-      Zypi.Pool.DevicePool
+      Zypi.Pool.ImageStore
     ]
+
     Supervisor.init(children, strategy: :one_for_one)
   end
 end

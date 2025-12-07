@@ -4,10 +4,8 @@ defmodule Zypi.API.Router do
 
   alias Zypi.Container.Manager
   alias Zypi.Store.Containers
-  alias Zypi.Image.{Delta, Registry}
-  alias Zypi.Image.Warmer
-  alias Zypi.Pool.DevicePool
-  alias Zypi.API.ConsoleSocket # Alias for the ConsoleSocket
+  alias Zypi.Pool.ImageStore
+  alias Zypi.API.ConsoleSocket
 
   plug Plug.Logger
   plug :match
@@ -19,117 +17,121 @@ defmodule Zypi.API.Router do
   end
 
   get "/status" do
-    status = %{
-      containers: Containers.count_by_status(),
-      images: length(Registry.list()),
-      pools: DevicePool.status()
-    }
-    send_json(conn, 200, status)
-  end
+  status = %{
+    containers: Containers.count_by_status(),
+    images: length(ImageStore.list_images())
+  }
+  send_json(conn, 200, status)
+end
 
   get "/images" do
-    send_json(conn, 200, %{images: Registry.list()})
-  end
+  send_json(conn, 200, %{images: ImageStore.list_images()})
+end
 
-  post "/images/:ref/push" do
-    Logger.info("API: POST /images/#{ref}/push")
-    case conn.body_params do
-      %{"config" => config} ->
-        config_str = if is_map(config), do: Jason.encode!(config), else: config
-        opts = [layers: conn.body_params["layers"] || [], size_bytes: conn.body_params["size_bytes"] || 0]
-        case Delta.push(ref, config_str, opts) do
-          {:ok, _} -> Warmer.warm(ref); send_json(conn, 201, %{status: "pushed", ref: ref})
-          {:error, reason} -> send_json(conn, 500, %{error: inspect(reason)})
-        end
-      _ -> send_json(conn, 400, %{error: "missing config field"})
+    post "/images/:ref/import" do
+  content_type = List.first(Plug.Conn.get_req_header(conn, "content-type") || [])
+  is_binary = content_type && (String.starts_with?(content_type, "application/octet-stream") || content_type == "application/x-tar" || String.contains?(content_type, "tar"))
+
+  if is_binary do
+    {:ok, body, conn} = Plug.Conn.read_body(conn, length: 500_000_000)
+    case Zypi.Image.Importer.import_tar(ref, body) do
+      {:ok, manifest} ->
+        send_json(conn, 201, %{status: "imported", ref: ref, size_bytes: manifest.size_bytes})
+      {:error, reason} ->
+        Logger.error("Import failed #{ref}: #{inspect(reason)}")
+        send_json(conn, 500, %{error: inspect(reason)})
     end
+  else
+    send_json(conn, 415, %{error: "Unsupported Media Type"})
   end
+end
+  # post "/images/:ref/import" do
+  #   Logger.info("API: POST /images/#{ref}/import - Starting import")
 
-  post "/images/:ref/import" do
-    Logger.info("API: POST /images/#{ref}/import - Starting import")
+  #   # Debug: Log all headers
+  #   Logger.debug("Headers: #{inspect(conn.req_headers)}")
 
-    # Debug: Log all headers
-    Logger.debug("Headers: #{inspect(conn.req_headers)}")
+  #   # Check content type
+  #   content_type = List.first(Plug.Conn.get_req_header(conn, "content-type") || [])
+  #   Logger.info("Content-Type header: #{inspect(content_type)}")
 
-    # Check content type
-    content_type = List.first(Plug.Conn.get_req_header(conn, "content-type") || [])
-    Logger.info("Content-Type header: #{inspect(content_type)}")
+  #   # Also check for empty content-type or other variations
+  #   Logger.info("All content-type headers: #{inspect(Plug.Conn.get_req_header(conn, "content-type"))}")
 
-    # Also check for empty content-type or other variations
-    Logger.info("All content-type headers: #{inspect(Plug.Conn.get_req_header(conn, "content-type"))}")
+  #   # Check if it's octet-stream or any other binary type
+  #   is_binary_content = content_type &&
+  #     (String.starts_with?(content_type, "application/octet-stream") ||
+  #      content_type == "application/x-tar" ||
+  #      content_type == "application/gzip" ||
+  #      String.contains?(content_type, "tar"))
 
-    # Check if it's octet-stream or any other binary type
-    is_binary_content = content_type &&
-      (String.starts_with?(content_type, "application/octet-stream") ||
-       content_type == "application/x-tar" ||
-       content_type == "application/gzip" ||
-       String.contains?(content_type, "tar"))
+  #   Logger.info("Is binary content? #{is_binary_content}")
 
-    Logger.info("Is binary content? #{is_binary_content}")
+  #   if is_binary_content do
+  #     # Read raw body for binary content
+  #     Logger.info("Reading binary body for import...")
 
-    if is_binary_content do
-      # Read raw body for binary content
-      Logger.info("Reading binary body for import...")
+  #     # Check content length if available
+  #     content_length = List.first(Plug.Conn.get_req_header(conn, "content-length") || [])
+  #     Logger.info("Content-Length: #{content_length}")
 
-      # Check content length if available
-      content_length = List.first(Plug.Conn.get_req_header(conn, "content-length") || [])
-      Logger.info("Content-Length: #{content_length}")
+  #     # Try to read the body
+  #     try do
+  #       # Read with a reasonable limit, adjust as needed
+  #       max_length = 100_000_000 # 100MB limit
+  #       {:ok, body, conn} = Plug.Conn.read_body(conn, length: max_length)
 
-      # Try to read the body
-      try do
-        # Read with a reasonable limit, adjust as needed
-        max_length = 100_000_000 # 100MB limit
-        {:ok, body, conn} = Plug.Conn.read_body(conn, length: max_length)
+  #       Logger.info("Successfully read body. Body size: #{byte_size(body)} bytes")
+  #       Logger.debug("First 100 bytes of body (hex): #{body |> binary_part(0, min(100, byte_size(body))) |> Base.encode16}")
 
-        Logger.info("Successfully read body. Body size: #{byte_size(body)} bytes")
-        Logger.debug("First 100 bytes of body (hex): #{body |> binary_part(0, min(100, byte_size(body))) |> Base.encode16}")
+  #       # Log if body is empty
+  #       if byte_size(body) == 0 do
+  #         Logger.error("Empty body received for import!")
+  #       end
 
-        # Log if body is empty
-        if byte_size(body) == 0 do
-          Logger.error("Empty body received for import!")
-        end
+  #       case Zypi.Image.Importer.import_tar(ref, body) do
+  #         {:ok, manifest} ->
+  #           Logger.info("Import successful for #{ref}. Layers: #{length(manifest.layers)}, Size: #{manifest.size_bytes}")
+  #           Zypi.Image.Warmer.warm(ref)
+  #           send_json(conn, 201, %{
+  #             status: "imported",
+  #             ref: ref,
+  #             layers: length(manifest.layers),
+  #             size_bytes: manifest.size_bytes
+  #           })
+  #         {:error, reason} ->
+  #           Logger.error("Import failed for #{ref}: #{inspect(reason)}")
+  #           send_json(conn, 500, %{error: inspect(reason)})
+  #       end
+  #     rescue
+  #       e in Plug.Conn.TooLargeError ->
+  #         Logger.error("Body too large: #{inspect(e)}")
+  #         send_json(conn, 413, %{error: "Payload too large"})
+  #       e ->
+  #         Logger.error("Error reading body: #{inspect(e)}")
+  #         Logger.error("Stacktrace: #{inspect(__STACKTRACE__)}")
+  #         send_json(conn, 500, %{error: "Failed to read request body: #{inspect(e)}"})
+  #     end
+  #   else
+  #     Logger.warning("Unsupported Content-Type for import: #{inspect(content_type)}. Expected application/octet-stream or similar.")
+  #     Logger.info("Request method: #{conn.method}, Path: #{conn.request_path}")
+  #     Logger.info("Full conn before response: #{inspect(conn, limit: :infinity, pretty: true)}")
 
-        case Zypi.Image.Importer.import_tar(ref, body) do
-          {:ok, manifest} ->
-            Logger.info("Import successful for #{ref}. Layers: #{length(manifest.layers)}, Size: #{manifest.size_bytes}")
-            Zypi.Image.Warmer.warm(ref)
-            send_json(conn, 201, %{
-              status: "imported",
-              ref: ref,
-              layers: length(manifest.layers),
-              size_bytes: manifest.size_bytes
-            })
-          {:error, reason} ->
-            Logger.error("Import failed for #{ref}: #{inspect(reason)}")
-            send_json(conn, 500, %{error: inspect(reason)})
-        end
-      rescue
-        e in Plug.Conn.TooLargeError ->
-          Logger.error("Body too large: #{inspect(e)}")
-          send_json(conn, 413, %{error: "Payload too large"})
-        e ->
-          Logger.error("Error reading body: #{inspect(e)}")
-          Logger.error("Stacktrace: #{inspect(__STACKTRACE__)}")
-          send_json(conn, 500, %{error: "Failed to read request body: #{inspect(e)}"})
-      end
-    else
-      Logger.warning("Unsupported Content-Type for import: #{inspect(content_type)}. Expected application/octet-stream or similar.")
-      Logger.info("Request method: #{conn.method}, Path: #{conn.request_path}")
-      Logger.info("Full conn before response: #{inspect(conn, limit: :infinity, pretty: true)}")
-
-      send_json(conn, 415, %{
-        error: "Unsupported Media Type",
-        received: content_type,
-        expected: "application/octet-stream, application/x-tar, or similar binary format",
-        details: "Make sure you're sending the Docker image tar with correct Content-Type header"
-      })
-    end
-  end
+  #     send_json(conn, 415, %{
+  #       error: "Unsupported Media Type",
+  #       received: content_type,
+  #       expected: "application/octet-stream, application/x-tar, or similar binary format",
+  #       details: "Make sure you're sending the Docker image tar with correct Content-Type header"
+  #     })
+  #   end
+  # end
 
   delete "/images/:ref" do
-    _result = Delta.delete(ref)
-    send_json(conn, 200, %{status: "deleted"})
+  case ImageStore.delete_image(ref) do
+    :ok -> send_json(conn, 200, %{status: "deleted"})
+    {:error, :not_found} -> send_json(conn, 404, %{error: "not_found"})
   end
+end
 
   get "/containers" do
     send_json(conn, 200, %{containers: Manager.list() |> Enum.map(&container_json/1)})
@@ -154,17 +156,17 @@ defmodule Zypi.API.Router do
     case Manager.get_shell_info(id) do
       {:ok, info} ->
         send_json(conn, 200, info)
-        
+
       {:error, :not_found} ->
         send_json(conn, 404, %{error: "not_found"})
-        
+
       {:error, {:not_running, status}} ->
         send_json(conn, 400, %{
           error: "container_not_running",
           status: to_string(status),
           message: "Container must be running to access shell"
         })
-        
+
       {:error, :ssh_not_configured} ->
         send_json(conn, 500, %{
           error: "ssh_not_configured",

@@ -9,17 +9,17 @@ defmodule Zypi.Store.Images do
   @table :zypi_images
 
   defmodule Image do
-    @enforce_keys [:ref]
-    defstruct [
-      :ref,
-      :device,
-      :size_bytes,
-      :pulled_at,
-      :manifest,
-      status: :unknown,
-      layers: []
-    ]
-  end
+  @enforce_keys [:ref]
+  defstruct [
+    :ref,
+    :device,
+    :size_bytes,
+    :pulled_at,
+    :manifest,
+    :container_config,
+    status: :unknown
+  ]
+end
 
   # Client API
 
