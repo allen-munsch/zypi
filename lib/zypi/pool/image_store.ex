@@ -14,9 +14,15 @@ defmodule Zypi.Pool.ImageStore do
 
   def get_image(ref), do: GenServer.call(__MODULE__, {:get_image, ref})
 
-  def put_image(ref, ext4_path, container_config, size_bytes) do
-    GenServer.call(__MODULE__, {:put_image, ref, ext4_path, container_config, size_bytes})
-  end
+ @doc "Async version - fire and forget."
+def put_image_async(ref, ext4_path, container_config, size_bytes) do
+  GenServer.cast(__MODULE__, {:put_image, ref, ext4_path, container_config, size_bytes})
+end
+
+ @doc "Sync version - waits for confirmation."
+def put_image(ref, ext4_path, container_config, size_bytes) do
+  GenServer.call(__MODULE__, {:put_image, ref, ext4_path, container_config, size_bytes})
+end
 
   def list_images, do: GenServer.call(__MODULE__, :list_images)
 
@@ -111,6 +117,20 @@ defmodule Zypi.Pool.ImageStore do
     container_dir = Path.join( @containers_dir, container_id)
     File.rm_rf(container_dir)
     {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_cast({:put_image, ref, ext4_path, container_config, size_bytes}, state) do
+    meta = %ImageMeta{
+      ref: ref,
+      ext4_path: ext4_path,
+      size_bytes: size_bytes,
+      created_at: DateTime.utc_now(),
+      container_config: container_config
+    }
+    save_image_meta(ref, meta)
+    images = Map.put(state.images, ref, meta)
+    {:noreply, %{state | images: images}}
   end
 
   defp do_snapshot_copy(source, dest) do

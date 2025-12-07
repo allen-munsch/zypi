@@ -91,7 +91,7 @@ defmodule Zypi.Container.Manager do
   defp cleanup_orphaned_consoles do
     # Get all containers from store
     containers = Zypi.Store.Containers.list()
-    container_ids = Enum.map(containers, & &1.id) |> MapSet.new()
+    _container_ids = Enum.map(containers, & &1.id) |> MapSet.new()
     
     # Find all globally registered consoles
     # :global.registered_names() returns all global names

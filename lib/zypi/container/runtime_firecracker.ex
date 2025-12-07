@@ -3,12 +3,12 @@ defmodule Zypi.Container.RuntimeFirecracker do
   Firecracker microVM runtime for Zypi containers.
   """
   require Logger
-  alias Zypi.Container.Console
+
 
   @data_dir Application.compile_env(:zypi, :data_dir, "/var/lib/zypi")
   @vm_dir Path.join(@data_dir, "vms")
   @kernel_path Application.compile_env(:zypi, :kernel_path, "/opt/zypi/kernel/vmlinux")
-  @initrd_path Application.compile_env(:zypi, :initrd_path, "/opt/zypi/kernel/initramfs.img")
+
 
   defmodule VMState do
     defstruct [:socket_path, :fc_port, :tap_device, :container_ip]
