@@ -11,16 +11,16 @@ defmodule Zypi.API.Router do
 
   defmodule Zypi.API.RequestTimer do
     @behaviour Plug
-    
+
     def init(opts), do: opts
-    
+
     def call(conn, _opts) do
       start_time = System.monotonic_time()
-      
+
       Plug.Conn.register_before_send(conn, fn conn ->
         duration = System.monotonic_time() - start_time
         duration_ms = System.convert_time_unit(duration, :native, :millisecond)
-        
+
         :telemetry.execute(
           [:zypi, :api, :request],
           %{duration_ms: duration_ms},
@@ -30,7 +30,7 @@ defmodule Zypi.API.Router do
             status: conn.status
           }
         )
-        
+
         # Add timing header
         Plug.Conn.put_resp_header(conn, "x-request-time-ms", to_string(duration_ms))
       end)
@@ -82,7 +82,7 @@ end
 
 get "/images/importing" do
   active_imports = StoreImages.list()
-  |> Enum.filter(fn image -> 
+  |> Enum.filter(fn image ->
     image.status in [:queued, :importing, :extracting, :applying_layers, :injecting_init]
   end)
   |> Enum.map(fn image ->
@@ -96,7 +96,7 @@ get "/images/importing" do
       started_at: image.pulled_at && DateTime.to_iso8601(image.pulled_at)
     }
   end)
-  
+
   send_json(conn, 200, %{imports: active_imports, count: length(active_imports)})
 end
 
@@ -106,23 +106,23 @@ end
 
   if is_binary do
     temp_path = Path.join(System.tmp_dir!(), "import-#{:crypto.strong_rand_bytes(8) |> Base.encode16()}.tar")
-    
+
     try do
       case stream_body_to_file(conn, temp_path) do
         {:ok, conn, bytes_read} ->
           Logger.info("Streamed #{bytes_read} bytes for #{ref}")
           tar_data = File.read!(temp_path)
-          
+
           case ImageImporter.import_tar(ref, tar_data) do
             {:ok, :accepted, ref} ->
               send_json(conn, 202, %{status: "accepted", ref: ref})
             {:error, reason} ->
               send_json(conn, 500, %{error: inspect(reason)})
           end
-          
+
         {:error, :body_too_large} ->
           send_json(conn, 413, %{error: "Payload too large"})
-          
+
         {:error, reason} ->
           send_json(conn, 500, %{error: inspect(reason)})
       end
@@ -252,7 +252,7 @@ end
   defp stream_body_to_file(conn, file_path, opts \\ []) do
     chunk_size = Keyword.get(opts, :chunk_size, 1_048_576)  # 1MB chunks
     max_size = Keyword.get(opts, :max_size, 500_000_000)    # 500MB max
-    
+
     File.open!(file_path, [:write, :binary], fn file ->
       stream_chunks(conn, file, 0, chunk_size, max_size)
     end)
@@ -263,7 +263,7 @@ end
       {:ok, data, conn} ->
         IO.binwrite(file, data)
         {:ok, conn, total_read + byte_size(data)}
-        
+
       {:more, data, conn} ->
         IO.binwrite(file, data)
         new_total = total_read + byte_size(data)
@@ -272,7 +272,7 @@ end
         else
           stream_chunks(conn, file, new_total, chunk_size, max_size)
         end
-        
+
       {:error, reason} ->
         {:error, reason}
     end
