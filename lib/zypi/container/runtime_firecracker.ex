@@ -351,8 +351,10 @@ defmodule Zypi.Container.RuntimeFirecracker do
   end
 
   def cleanup(container_id) do
-    System.cmd("pkill", ["-f", "firecracker.*api.sock"], stderr_to_stdout: true)
-    File.rm_rf(Path.join(@vm_dir, container_id))
+    vm_path = Path.join(@vm_dir, container_id)
+    socket_path = Path.join(vm_path, "api.sock")
+    System.cmd("pkill", ["-f", "firecracker.*#{socket_path}"], stderr_to_stdout: true)
+    File.rm_rf(vm_path)
     Zypi.Container.Console.stop(container_id)
     :ok
   end

@@ -1,25 +1,26 @@
+#!/bin/bash
+source tools/zypi-cli.sh
 
-for x in $(seq 2 3);do 
-	echo $x
-	pushd hello-zippy
-	docker build -t hello-zippy:v$x .
-	popd
+IMAGES=("hello-zypi:sh" "hello-zippy:py" "hello-zypgo:go")
+DIRS=("hello-zypi" "hello-zippy" "hello-zypgo")
 
-	source tools/zypi-cli.sh
-	docker save hello-zippy:v$x | docker compose exec -T zypi-node curl -v -X POST -H "Content-Type: application/octet-stream"   --data-binary @- "http://localhost:4000/images/hello-zippy:v$x/import"
-	zypi create test$x hello-zippy:v$x
-	zypi start test$x
+for i in 0 1 2; do
+  dir="${DIRS[$i]}"
+  img="${IMAGES[$i]}"
+  name="test-${dir}"
+  
+  echo "==> Building $img from $dir"
+  docker build -t "$img" "$dir"
+  
+  echo "==> Pushing $img"
+  zypi push "$img"
+  
+  echo "==> Creating and starting $name"
+  zypi create "$name" "$img"
+  zypi start "$name"
+  
+  echo ""
 done
 
-
-for x in $(seq 21 22);do 
-	echo $x
-	pushd hello-zippy
-	docker build -t hello-zippy:v$x .
-	popd
-
-	source tools/zypi-cli.sh
-	docker save hello-zippy:v$x | docker compose exec -T zypi-node curl -v -X POST -H "Content-Type: application/octet-stream"   --data-binary @- "http://localhost:4000/images/hello-zippy:v$x/import"
-	zypi create test$x hello-zippy:v$x
-	zypi start test$x
-done
+echo "==> All containers:"
+zypi list

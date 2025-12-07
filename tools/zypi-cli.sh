@@ -37,8 +37,8 @@ zypi() {
       echo "==> Pushing ${ref} to Zypi..."
       docker save "$ref" | docker compose exec -T $SERVICE curl -sf -X POST \
         -H "Content-Type: application/octet-stream" \
-        --data-binary @tools/extract-docker-image.sh "${API}/images/${ref}/import" | jq .
-      ;; 
+        --data-binary @- "${API}/images/${ref}/import" | jq .
+      ;;
     images)
       _api GET "/images" | jq .
       ;; 
