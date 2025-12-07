@@ -9,17 +9,24 @@ defmodule Zypi.Store.Images do
   @table :zypi_images
 
   defmodule Image do
-    @enforce_keys [:ref]
-    defstruct [
-      :ref,
-      :device,
-      :size_bytes,
-      :pulled_at,
-      :manifest,
-      status: :unknown,
-      layers: []
-    ]
-  end
+  @enforce_keys [:ref]
+  defstruct [
+    :ref,
+    :device,
+    :size_bytes,
+    :pulled_at,
+    :manifest,
+    :container_config,
+    :error_message,
+    :started_at,
+    :completed_at,
+    status: :unknown,
+    progress: 0,
+    current_step: nil,
+    total_layers: 0,
+    applied_layers: 0
+  ]
+end
 
   # Client API
 
@@ -59,6 +66,41 @@ defmodule Zypi.Store.Images do
   def delete(image_ref) do
     :ets.delete(@table, image_ref)
     :ok
+  end
+
+  def update_progress(image_ref, step, progress, extra \\ %{}) do
+    updates = Map.merge(%{
+      current_step: step,
+      progress: progress
+    }, extra)
+    
+    case update(image_ref, updates) do
+      {:ok, _} = result ->
+        Logger.debug("Image #{image_ref} progress: #{step} #{progress}%")
+        result
+      error ->
+        error
+    end
+  end
+
+  def mark_failed(image_ref, reason) do
+    update(image_ref, %{
+      status: :failed,
+      error_message: inspect(reason),
+      completed_at: DateTime.utc_now()
+    })
+  end
+
+  def mark_completed(image_ref, device, size_bytes, container_config) do
+    update(image_ref, %{
+      status: :ready,
+      device: device,
+      size_bytes: size_bytes,
+      container_config: container_config,
+      progress: 100,
+      current_step: :completed,
+      completed_at: DateTime.utc_now()
+    })
   end
 
   def ready?(image_ref) do

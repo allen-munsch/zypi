@@ -4,12 +4,41 @@ defmodule Zypi.API.Router do
 
   alias Zypi.Container.Manager
   alias Zypi.Store.Containers
-  alias Zypi.Image.{Delta, Registry}
-  alias Zypi.Image.Warmer
-  alias Zypi.Pool.DevicePool
-  alias Zypi.API.ConsoleSocket # Alias for the ConsoleSocket
+  alias Zypi.Pool.ImageStore
+  alias Zypi.API.ConsoleSocket
+  alias Zypi.Store.Images, as: StoreImages
+  alias Zypi.Image.Importer, as: ImageImporter
+
+  defmodule Zypi.API.RequestTimer do
+    @behaviour Plug
+    
+    def init(opts), do: opts
+    
+    def call(conn, _opts) do
+      start_time = System.monotonic_time()
+      
+      Plug.Conn.register_before_send(conn, fn conn ->
+        duration = System.monotonic_time() - start_time
+        duration_ms = System.convert_time_unit(duration, :native, :millisecond)
+        
+        :telemetry.execute(
+          [:zypi, :api, :request],
+          %{duration_ms: duration_ms},
+          %{
+            path: conn.request_path,
+            method: conn.method,
+            status: conn.status
+          }
+        )
+        
+        # Add timing header
+        Plug.Conn.put_resp_header(conn, "x-request-time-ms", to_string(duration_ms))
+      end)
+    end
+  end
 
   plug Plug.Logger
+  plug Zypi.API.RequestTimer  # Add this line
   plug :match
   plug Plug.Parsers, parsers: [:json], json_decoder: Jason, pass: ["application/json", "application/octet-stream", "application/x-tar", "application/gzip", "application/x-gzip"]
   plug :dispatch
@@ -19,117 +48,99 @@ defmodule Zypi.API.Router do
   end
 
   get "/status" do
-    status = %{
-      containers: Containers.count_by_status(),
-      images: length(Registry.list()),
-      pools: DevicePool.status()
-    }
-    send_json(conn, 200, status)
-  end
+  status = %{
+    containers: Containers.count_by_status(),
+    images: length(ImageStore.list_images())
+  }
+  send_json(conn, 200, status)
+end
 
   get "/images" do
-    send_json(conn, 200, %{images: Registry.list()})
+  send_json(conn, 200, %{images: ImageStore.list_images()})
+end
+
+get "/images/:ref/status" do
+  case StoreImages.get(ref) do
+    {:ok, image} ->
+      response = %{
+        ref: image.ref,
+        status: image.status,
+        progress: image.progress || 0,
+        current_step: image.current_step,
+        total_layers: image.total_layers || 0,
+        applied_layers: image.applied_layers || 0,
+        size_bytes: image.size_bytes,
+        error_message: image.error_message,
+        started_at: image.started_at && DateTime.to_iso8601(image.started_at),
+        completed_at: image.completed_at && DateTime.to_iso8601(image.completed_at)
+      }
+      send_json(conn, 200, response)
+    {:error, :not_found} ->
+      send_json(conn, 404, %{error: "not_found"})
   end
+end
 
-  post "/images/:ref/push" do
-    Logger.info("API: POST /images/#{ref}/push")
-    case conn.body_params do
-      %{"config" => config} ->
-        config_str = if is_map(config), do: Jason.encode!(config), else: config
-        opts = [layers: conn.body_params["layers"] || [], size_bytes: conn.body_params["size_bytes"] || 0]
-        case Delta.push(ref, config_str, opts) do
-          {:ok, _} -> Warmer.warm(ref); send_json(conn, 201, %{status: "pushed", ref: ref})
-          {:error, reason} -> send_json(conn, 500, %{error: inspect(reason)})
-        end
-      _ -> send_json(conn, 400, %{error: "missing config field"})
-    end
-  end
+get "/images/importing" do
+  active_imports = StoreImages.list()
+  |> Enum.filter(fn image -> 
+    image.status in [:queued, :importing, :extracting, :applying_layers, :injecting_init]
+  end)
+  |> Enum.map(fn image ->
+    %{
+      ref: image.ref,
+      status: image.status,
+      progress: image.progress || 0,
+      current_step: image.current_step,
+      applied_layers: image.applied_layers || 0,
+      total_layers: image.total_layers || 0,
+      started_at: image.pulled_at && DateTime.to_iso8601(image.pulled_at)
+    }
+  end)
+  
+  send_json(conn, 200, %{imports: active_imports, count: length(active_imports)})
+end
 
-  post "/images/:ref/import" do
-    Logger.info("API: POST /images/#{ref}/import - Starting import")
+    post "/images/:ref/import" do
+  content_type = List.first(Plug.Conn.get_req_header(conn, "content-type") || [])
+  is_binary = content_type && (String.starts_with?(content_type, "application/octet-stream") || content_type == "application/x-tar" || String.contains?(content_type, "tar"))
 
-    # Debug: Log all headers
-    Logger.debug("Headers: #{inspect(conn.req_headers)}")
-
-    # Check content type
-    content_type = List.first(Plug.Conn.get_req_header(conn, "content-type") || [])
-    Logger.info("Content-Type header: #{inspect(content_type)}")
-
-    # Also check for empty content-type or other variations
-    Logger.info("All content-type headers: #{inspect(Plug.Conn.get_req_header(conn, "content-type"))}")
-
-    # Check if it's octet-stream or any other binary type
-    is_binary_content = content_type &&
-      (String.starts_with?(content_type, "application/octet-stream") ||
-       content_type == "application/x-tar" ||
-       content_type == "application/gzip" ||
-       String.contains?(content_type, "tar"))
-
-    Logger.info("Is binary content? #{is_binary_content}")
-
-    if is_binary_content do
-      # Read raw body for binary content
-      Logger.info("Reading binary body for import...")
-
-      # Check content length if available
-      content_length = List.first(Plug.Conn.get_req_header(conn, "content-length") || [])
-      Logger.info("Content-Length: #{content_length}")
-
-      # Try to read the body
-      try do
-        # Read with a reasonable limit, adjust as needed
-        max_length = 100_000_000 # 100MB limit
-        {:ok, body, conn} = Plug.Conn.read_body(conn, length: max_length)
-
-        Logger.info("Successfully read body. Body size: #{byte_size(body)} bytes")
-        Logger.debug("First 100 bytes of body (hex): #{body |> binary_part(0, min(100, byte_size(body))) |> Base.encode16}")
-
-        # Log if body is empty
-        if byte_size(body) == 0 do
-          Logger.error("Empty body received for import!")
-        end
-
-        case Zypi.Image.Importer.import_tar(ref, body) do
-          {:ok, manifest} ->
-            Logger.info("Import successful for #{ref}. Layers: #{length(manifest.layers)}, Size: #{manifest.size_bytes}")
-            Zypi.Image.Warmer.warm(ref)
-            send_json(conn, 201, %{
-              status: "imported",
-              ref: ref,
-              layers: length(manifest.layers),
-              size_bytes: manifest.size_bytes
-            })
-          {:error, reason} ->
-            Logger.error("Import failed for #{ref}: #{inspect(reason)}")
-            send_json(conn, 500, %{error: inspect(reason)})
-        end
-      rescue
-        e in Plug.Conn.TooLargeError ->
-          Logger.error("Body too large: #{inspect(e)}")
+  if is_binary do
+    temp_path = Path.join(System.tmp_dir!(), "import-#{:crypto.strong_rand_bytes(8) |> Base.encode16()}.tar")
+    
+    try do
+      case stream_body_to_file(conn, temp_path) do
+        {:ok, conn, bytes_read} ->
+          Logger.info("Streamed #{bytes_read} bytes for #{ref}")
+          tar_data = File.read!(temp_path)
+          
+          case ImageImporter.import_tar(ref, tar_data) do
+            {:ok, :accepted, ref} ->
+              send_json(conn, 202, %{status: "accepted", ref: ref})
+            {:error, reason} ->
+              send_json(conn, 500, %{error: inspect(reason)})
+          end
+          
+        {:error, :body_too_large} ->
           send_json(conn, 413, %{error: "Payload too large"})
-        e ->
-          Logger.error("Error reading body: #{inspect(e)}")
-          Logger.error("Stacktrace: #{inspect(__STACKTRACE__)}")
-          send_json(conn, 500, %{error: "Failed to read request body: #{inspect(e)}"})
+          
+        {:error, reason} ->
+          send_json(conn, 500, %{error: inspect(reason)})
       end
-    else
-      Logger.warning("Unsupported Content-Type for import: #{inspect(content_type)}. Expected application/octet-stream or similar.")
-      Logger.info("Request method: #{conn.method}, Path: #{conn.request_path}")
-      Logger.info("Full conn before response: #{inspect(conn, limit: :infinity, pretty: true)}")
-
-      send_json(conn, 415, %{
-        error: "Unsupported Media Type",
-        received: content_type,
-        expected: "application/octet-stream, application/x-tar, or similar binary format",
-        details: "Make sure you're sending the Docker image tar with correct Content-Type header"
-      })
+    after
+      File.rm(temp_path)
     end
+  else
+    send_json(conn, 415, %{error: "Unsupported Media Type"})
   end
+end
+
 
   delete "/images/:ref" do
-    _result = Delta.delete(ref)
-    send_json(conn, 200, %{status: "deleted"})
+  case ImageStore.delete_image(ref) do
+    :ok -> send_json(conn, 200, %{status: "deleted"})
+    {:error, :not_found} -> send_json(conn, 404, %{error: "not_found"})
   end
+end
 
   get "/containers" do
     send_json(conn, 200, %{containers: Manager.list() |> Enum.map(&container_json/1)})
@@ -154,17 +165,17 @@ defmodule Zypi.API.Router do
     case Manager.get_shell_info(id) do
       {:ok, info} ->
         send_json(conn, 200, info)
-        
+
       {:error, :not_found} ->
         send_json(conn, 404, %{error: "not_found"})
-        
+
       {:error, {:not_running, status}} ->
         send_json(conn, 400, %{
           error: "container_not_running",
           status: to_string(status),
           message: "Container must be running to access shell"
         })
-        
+
       {:error, :ssh_not_configured} ->
         send_json(conn, 500, %{
           error: "ssh_not_configured",
@@ -236,6 +247,39 @@ defmodule Zypi.API.Router do
       {:ok, _} -> send_json(conn, 400, %{error: "container_not_running"})
       {:error, :not_found} -> send_json(conn, 404, %{error: "not_found"})
     end
+  end
+
+  defp stream_body_to_file(conn, file_path, opts \\ []) do
+    chunk_size = Keyword.get(opts, :chunk_size, 1_048_576)  # 1MB chunks
+    max_size = Keyword.get(opts, :max_size, 500_000_000)    # 500MB max
+    
+    File.open!(file_path, [:write, :binary], fn file ->
+      stream_chunks(conn, file, 0, chunk_size, max_size)
+    end)
+  end
+
+  defp stream_chunks(conn, file, total_read, chunk_size, max_size) when total_read < max_size do
+    case Plug.Conn.read_body(conn, length: chunk_size, read_length: chunk_size) do
+      {:ok, data, conn} ->
+        IO.binwrite(file, data)
+        {:ok, conn, total_read + byte_size(data)}
+        
+      {:more, data, conn} ->
+        IO.binwrite(file, data)
+        new_total = total_read + byte_size(data)
+        if new_total >= max_size do
+          {:error, :body_too_large}
+        else
+          stream_chunks(conn, file, new_total, chunk_size, max_size)
+        end
+        
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp stream_chunks(_conn, _file, total_read, _chunk_size, max_size) when total_read >= max_size do
+    {:error, :body_too_large}
   end
 
   match _ do

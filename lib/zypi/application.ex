@@ -4,9 +4,11 @@ defmodule Zypi.Application do
   """
 
   use Application
+  require Zypi.Telemetry
 
   @impl true
   def start(_type, _args) do
+    Zypi.Telemetry.setup()  # Add this line
     Zypi.System.Stats.init()
     setup_network_bridge()
     detect_and_set_ssh_key_path()

@@ -3,12 +3,12 @@ defmodule Zypi.Container.RuntimeFirecracker do
   Firecracker microVM runtime for Zypi containers.
   """
   require Logger
-  alias Zypi.Container.Console
+
 
   @data_dir Application.compile_env(:zypi, :data_dir, "/var/lib/zypi")
   @vm_dir Path.join(@data_dir, "vms")
   @kernel_path Application.compile_env(:zypi, :kernel_path, "/opt/zypi/kernel/vmlinux")
-  @initrd_path Application.compile_env(:zypi, :initrd_path, "/opt/zypi/kernel/initramfs.img")
+
 
   defmodule VMState do
     defstruct [:socket_path, :fc_port, :tap_device, :container_ip]
@@ -133,18 +133,10 @@ defmodule Zypi.Container.RuntimeFirecracker do
   end
 
   def configure_vm(socket_path, container, tap) do
-    # Use the DevicePool-created image (which has base rootfs + OCI layers + openssh)
-    image_id = Base.url_encode64(container.image, padding: false)
-    data_dir = Application.get_env(:zypi, :data_dir, "/var/lib/zypi")
-    rootfs_path = Path.join([data_dir, "devices", "#{image_id}.img"])
+    # The rootfs is now expected to be a TCMU device path from the snapshot
+    rootfs_path = container.rootfs
 
-    Logger.info("RuntimeFirecracker: Using rootfs: #{rootfs_path}")
-
-    unless File.exists?(rootfs_path) do
-      Logger.error("RuntimeFirecracker: Rootfs not found at #{rootfs_path}")
-      throw({:error, :rootfs_not_found})
-    end
-
+    Logger.info("RuntimeFirecracker: Using rootfs device: #{rootfs_path}")
     Logger.info("RuntimeFirecracker: Using kernel: #{@kernel_path}")
 
     vm_path = Path.join(@vm_dir, container.id)
@@ -230,7 +222,7 @@ defmodule Zypi.Container.RuntimeFirecracker do
     end
   end
 
-  def setup_tap(container_id, ip) do
+  def setup_tap(container_id, _ip) do
     setup_bridge()
     tap_name = "ztap#{:erlang.phash2(container_id, 9999)}"
     bridge_name = "zypi0"
@@ -334,7 +326,7 @@ defmodule Zypi.Container.RuntimeFirecracker do
   """
   def setup_bridge() do
     # Check if bridge exists
-    {output, exit_code} = System.cmd("ip", ["link", "show", "zypi0"], stderr_to_stdout: true)
+    {_output, exit_code} = System.cmd("ip", ["link", "show", "zypi0"], stderr_to_stdout: true)
 
     if exit_code != 0 do
       Logger.info("Creating zypi0 bridge")
@@ -359,8 +351,10 @@ defmodule Zypi.Container.RuntimeFirecracker do
   end
 
   def cleanup(container_id) do
-    System.cmd("pkill", ["-f", "firecracker.*api.sock"], stderr_to_stdout: true)
-    File.rm_rf(Path.join(@vm_dir, container_id))
+    vm_path = Path.join(@vm_dir, container_id)
+    socket_path = Path.join(vm_path, "api.sock")
+    System.cmd("pkill", ["-f", "firecracker.*#{socket_path}"], stderr_to_stdout: true)
+    File.rm_rf(vm_path)
     Zypi.Container.Console.stop(container_id)
     :ok
   end
