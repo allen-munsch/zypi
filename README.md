@@ -2,6 +2,33 @@
 
 Zypi is a simple container runtime written in Elixir for firecracker microVMs
 
+It's experimental.
+
+# Demo
+
+![demo video](docs/zypi-overlaybd-2025-12-07_15.14.49.mp4)
+
+
+```
+03:15:37 jm@pop-os zypi ±|optimize-observe ✗|→ zypi shell test-hello-zippy
+Connecting via SSH to root@10.0.0.3...
+Press Ctrl-D or type 'exit' to disconnect.
+
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║   ███████╗██╗   ██╗██████╗ ██╗                                ║
+║   ╚══███╔╝╚██╗ ██╔╝██╔══██╗██║                                ║
+║     ███╔╝  ╚████╔╝ ██████╔╝██║                                ║
+║    ███╔╝    ╚██╔╝  ██╔═══╝ ██║                                ║
+║   ███████╗   ██║   ██║     ██║                                ║
+║   ╚══════╝   ╚═╝   ╚═╝     ╚═╝                                ║
+║                                                               ║
+║   ⚡ Firecracker microVM · Sub-second boot · CoW snapshots    ║
+║                                                               ║
+╚═══════════════════════════════════════════════════════════════╝
+
+```
+
 ## Quick Start
 
 ```bash
