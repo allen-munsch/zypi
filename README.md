@@ -6,7 +6,7 @@ It's experimental.
 
 # Demo
 
-<video src="docs/zypi-overlaybd-2025-12-07_15.14.49.mp4" autoplay loop muted playsinline></video>
+![demo](docs/demo.gif)
 
 
 ```
