@@ -8,7 +8,7 @@ defmodule Zypi.Container.Manager do
   alias Zypi.Store.Containers
   alias Zypi.Store.Containers.Container
   alias Zypi.Pool.IPPool
-  alias Zypi.Container.Runtime
+  alias Zypi.Runtime
 
   @output_buffer_size 1000
 
