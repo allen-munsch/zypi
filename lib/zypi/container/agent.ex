@@ -122,7 +122,7 @@ defmodule Zypi.Container.Agent do
   def call(container_id, method, params, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @call_timeout)
 
-    with {:ok, conn} <- connect(container_id),
+    with {:ok, conn} <- connect(container_id, opts),
          {:ok, response} <- do_call(conn, method, params, timeout) do
       :gen_tcp.close(conn)
 
@@ -137,17 +137,61 @@ defmodule Zypi.Container.Agent do
     end
   end
 
-  defp connect(container_id) do
-    case get_vm_ip(container_id) do
-      {:ok, ip} ->
-        ip_charlist = ip |> to_charlist()
-        :gen_tcp.connect(ip_charlist, @tcp_port, [
-          :binary,
-          active: false,
-          packet: :line
-        ], @connect_timeout)
+  @doc """
+  Make an RPC call with explicit host/port (for QEMU port forwarding).
+  """
+  def call_with_host(container_id, method, params, opts) do
+    host = Keyword.fetch!(opts, :host)
+    port = Keyword.fetch!(opts, :port)
+    timeout = Keyword.get(opts, :timeout, @call_timeout)
+
+    case :gen_tcp.connect(String.to_charlist(host), port, [
+      :binary,
+      active: false,
+      packet: :line
+    ], @connect_timeout) do
+      {:ok, conn} ->
+        result = do_call(conn, method, params, timeout)
+        :gen_tcp.close(conn)
+        
+        case result do
+          {:ok, %{"error" => %{"code" => code, "message" => msg}}} ->
+            {:error, {:rpc_error, code, msg}}
+          {:ok, %{"result" => result}} ->
+            {:ok, result}
+          {:ok, other} ->
+            {:error, {:unexpected_response, other}}
+          error -> error
+        end
+        
       error -> error
     end
+  end
+
+  defp connect(container_id, opts \\ []) do
+    host = Keyword.get(opts, :host)
+    port = Keyword.get(opts, :port, @tcp_port)
+    
+    ip = if host do
+      host
+    else
+      case get_vm_ip(container_id) do
+        {:ok, ip} -> ip
+        error -> throw(error)
+      end
+    end
+    
+    ip_charlist = if is_binary(ip) do
+       ip |> to_charlist()
+    else
+       ip |> Tuple.to_list() |> Enum.join(".") |> to_charlist()
+    end
+
+    :gen_tcp.connect(ip_charlist, port, [
+      :binary,
+      active: false,
+      packet: :line
+    ], @connect_timeout)
   end
 
   defp do_call(socket, method, params, timeout) do
