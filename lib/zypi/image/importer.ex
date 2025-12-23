@@ -406,7 +406,7 @@ end
       encoded = Base.url_encode64(ref, padding: false)
       ext4_path = Path.join( @images_dir, "#{encoded}.ext4")
       {_, 0} = System.cmd("cp", ["--reflink=auto", "--sparse=always", cached_path, ext4_path], stderr_to_stdout: true)
-      :ok = inject_init(ext4_path, container_config)
+      :ok = Zypi.Image.InitGenerator.inject(ext4_path, container_config)
       {:ok, ext4_path}
     else
       Logger.info("Building new image, will cache as #{layer_hash}")
@@ -502,7 +502,7 @@ end
         # Inject init
         inject_start = System.monotonic_time(:millisecond)
         Logger.info("Injecting init script...")
-        :ok = inject_init(ext4_path, container_config)
+        :ok = Zypi.Image.InitGenerator.inject(ext4_path, container_config)
         inject_time = System.monotonic_time(:millisecond) - inject_start
         Logger.info("Init injected in #{inject_time}ms")
         {:ok, ext4_path}

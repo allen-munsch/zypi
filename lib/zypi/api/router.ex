@@ -8,6 +8,8 @@ defmodule Zypi.API.Router do
   alias Zypi.API.ConsoleSocket
   alias Zypi.Store.Images, as: StoreImages
   alias Zypi.Image.Importer, as: ImageImporter
+  alias Zypi.Executor
+  alias Zypi.Pool.VMPool
 
   defmodule Zypi.API.RequestTimer do
     @behaviour Plug
@@ -280,6 +282,40 @@ end
 
   defp stream_chunks(_conn, _file, total_read, _chunk_size, max_size) when total_read >= max_size do
     {:error, :body_too_large}
+  end
+
+  post "/exec" do
+    cmd = conn.body_params["cmd"]
+    
+    if is_nil(cmd) or not is_list(cmd) do
+      send_json(conn, 400, %{error: "cmd must be a list of strings"})
+    else
+      opts = [
+        image: conn.body_params["image"],
+        env: conn.body_params["env"],
+        workdir: conn.body_params["workdir"],
+        timeout: conn.body_params["timeout"],
+        files: conn.body_params["files"]
+      ] |> Enum.reject(fn {_, v} -> is_nil(v) end)
+      
+      case Executor.run(cmd, opts) do
+        {:ok, result} -> 
+          send_json(conn, 200, %{
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            duration_ms: result.duration_ms,
+            container_id: result.container_id
+          })
+        {:error, reason} -> 
+          send_json(conn, 500, %{error: inspect(reason)})
+      end
+    end
+  end
+
+  get "/pool/stats" do
+    stats = VMPool.stats()
+    send_json(conn, 200, stats)
   end
 
   match _ do

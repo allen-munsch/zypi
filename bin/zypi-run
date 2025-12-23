@@ -1,0 +1,130 @@
+#!/bin/bash
+# zypi-run - Simple CLI wrapper for Zyppi executor
+# Usage: zypi-run --image IMAGE -- COMMAND [ARGS...]
+
+set -e
+
+API_URL="${ZYPI_API_URL:-http://localhost:4000}"
+
+show_help() {
+    cat << EOF
+zypi-run - Run commands in isolated Firecracker microVMs
+
+Usage:
+  zypi-run [OPTIONS] -- COMMAND [ARGS...]
+
+Required:
+  --image, -i IMAGE    Container image to use
+
+Options:
+  --env KEY=VALUE      Set environment variable (can repeat)
+  --workdir DIR        Set working directory
+  --timeout SECS       Execution timeout (default: 60)
+  --help               Show this help
+
+Examples:
+  zypi-run --image python:3.11 -- python -c "print('hello')"
+  zypi-run --image ubuntu:22.04 --timeout 300 -- ./build.sh
+EOF
+}
+
+IMAGE=""
+ENV_VARS="{}"
+WORKDIR=""
+TIMEOUT=""
+CMD=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --image|-i)
+            IMAGE="$2"
+            shift 2
+            ;;
+        --env)
+            # Parse KEY=VALUE
+            KEY="${2%%=*}"
+            VALUE="${2#*=}"
+            ENV_VARS=$(echo "$ENV_VARS" | jq ". + {\"$KEY\": \"$VALUE\"}")
+            shift 2
+            ;;
+        --workdir)
+            WORKDIR="$2"
+            shift 2
+            ;;
+        --timeout)
+            TIMEOUT="$2"
+            shift 2
+            ;;
+        --help)
+            show_help
+            exit 0
+            ;;
+        --)
+            shift
+            CMD="$@"
+            break
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+if [[ -z "$IMAGE" ]]; then
+    echo "Error: --image is required" >&2
+    show_help
+    exit 1
+fi
+
+if [[ -z "$CMD" ]]; then
+    echo "Error: No command specified" >&2
+    show_help
+    exit 1
+fi
+
+# Convert command to JSON array
+CMD_JSON=$(printf '%s\n' "$@" | jq -R . | jq -s .)
+
+# Build request body
+BODY=$(jq -n \
+    --argjson cmd "$CMD_JSON" \
+    --arg image "$IMAGE" \
+    --argjson env "$ENV_VARS" \
+    '{cmd: $cmd, image: $image, env: $env}')
+
+if [[ -n "$WORKDIR" ]]; then
+    BODY=$(echo "$BODY" | jq --arg wd "$WORKDIR" '. + {workdir: $wd}')
+fi
+
+if [[ -n "$TIMEOUT" ]]; then
+    BODY=$(echo "$BODY" | jq --argjson t "$TIMEOUT" '. + {timeout: $t}')
+fi
+
+# Make request
+RESPONSE=$(curl -s -X POST "$API_URL/exec" \
+    -H "Content-Type: application/json" \
+    -d "$BODY")
+
+# Extract results
+EXIT_CODE=$(echo "$RESPONSE" | jq -r '.exit_code // 1')
+STDOUT=$(echo "$RESPONSE" | jq -r '.stdout // ""')
+STDERR=$(echo "$RESPONSE" | jq -r '.stderr // ""')
+ERROR=$(echo "$RESPONSE" | jq -r '.error // ""')
+
+# Output
+if [[ -n "$STDOUT" ]]; then
+    echo -n "$STDOUT"
+fi
+
+if [[ -n "$STDERR" ]]; then
+    echo -n "$STDERR" >&2
+fi
+
+if [[ -n "$ERROR" ]]; then
+    echo "Error: $ERROR" >&2
+    exit 1
+fi
+
+exit "$EXIT_CODE"
