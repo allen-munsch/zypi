@@ -69,11 +69,12 @@ defmodule Zypi.System.Cleanup do
       dirs_cleaned: 0
     }
 
-    active_containers = get_active_container_ids()
+    active_ids = get_active_ids()
+    Logger.debug("Cleanup: #{MapSet.size(active_ids)} active container/VM IDs")
 
-    stats = cleanup_tap_devices(stats, active_containers)
-    stats = cleanup_zombie_processes(stats, active_containers)
-    stats = cleanup_stale_dirs(stats, active_containers)
+    stats = cleanup_tap_devices(stats, active_ids)
+    stats = cleanup_zombie_processes(stats, active_ids)
+    stats = cleanup_stale_dirs(stats, active_ids)
 
     if stats.tap_devices_cleaned > 0 or
        stats.processes_killed > 0 or
@@ -84,14 +85,31 @@ defmodule Zypi.System.Cleanup do
     stats
   end
 
-  defp get_active_container_ids do
-    Zypi.Store.Containers.list()
+  @doc """
+  Get all active container IDs AND warm VM IDs.
+  This ensures we don't clean up warm VMs from the pool.
+  """
+  defp get_active_ids do
+    # Get container IDs from store
+    container_ids = Zypi.Store.Containers.list()
     |> Enum.filter(& &1.status in [:running, :starting, :created])
     |> Enum.map(& &1.id)
-    |> MapSet.new()
+
+    # Get VM IDs from the warm pool - these should NOT be cleaned up
+    vm_pool_ids = try do
+      Zypi.Pool.VMPool.active_vm_ids()
+    rescue
+      _ -> []
+    catch
+      :exit, _ -> []
+    end
+
+    Logger.debug("Cleanup: #{length(container_ids)} containers, #{length(vm_pool_ids)} pool VMs")
+
+    MapSet.new(container_ids ++ vm_pool_ids)
   end
 
-  defp cleanup_tap_devices(stats, _active_containers) do
+  defp cleanup_tap_devices(stats, _active_ids) do
     case System.cmd("ip", ["-o", "link", "show", "type", "tun"], stderr_to_stdout: true) do
       {output, 0} ->
         tap_devices = output
@@ -124,20 +142,22 @@ defmodule Zypi.System.Cleanup do
     end
   end
 
-  defp cleanup_zombie_processes(stats, active_containers) do
+  defp cleanup_zombie_processes(stats, active_ids) do
     case System.cmd("pgrep", ["-a", "-f", "firecracker.*api.sock"], stderr_to_stdout: true) do
       {output, _} ->
         cleaned = output
         |> String.split("\n", trim: true)
         |> Enum.reduce(0, fn line, count ->
           case Regex.run(~r/^(\d+).*\/vms\/([^\/]+)\//, line) do
-            [_, pid_str, container_id] ->
-              if not MapSet.member?(active_containers, container_id) do
+            [_, pid_str, vm_or_container_id] ->
+              # Check if this ID is in our active set (containers OR warm VMs)
+              if not MapSet.member?(active_ids, vm_or_container_id) do
                 pid = String.to_integer(pid_str)
-                Logger.info("Killing orphaned Firecracker process #{pid} for #{container_id}")
+                Logger.info("Killing orphaned Firecracker process #{pid} for #{vm_or_container_id}")
                 System.cmd("kill", ["-9", "#{pid}"], stderr_to_stdout: true)
                 count + 1
               else
+                Logger.debug("Preserving active Firecracker process for #{vm_or_container_id}")
                 count
               end
             _ -> count
@@ -151,34 +171,37 @@ defmodule Zypi.System.Cleanup do
     end
   end
 
-  defp cleanup_stale_dirs(stats, active_containers) do
+  defp cleanup_stale_dirs(stats, active_ids) do
     vms_dir = Path.join(@data_dir, "vms")
     containers_dir = Path.join(@data_dir, "containers")
 
-    cleaned = cleanup_dir(vms_dir, active_containers) +
-              cleanup_dir(containers_dir, active_containers)
+    cleaned = cleanup_dir(vms_dir, active_ids) +
+              cleanup_dir(containers_dir, active_ids)
 
     %{stats | dirs_cleaned: cleaned}
   end
 
-  defp cleanup_dir(dir, active_containers) do
+  defp cleanup_dir(dir, active_ids) do
     case File.ls(dir) do
       {:ok, entries} ->
         entries
         |> Enum.reduce(0, fn entry, count ->
           path = Path.join(dir, entry)
 
-          if File.dir?(path) and not MapSet.member?(active_containers, entry) do
+          # Only clean if NOT in active IDs (containers or warm VMs)
+          if File.dir?(path) and not MapSet.member?(active_ids, entry) do
             case File.stat(path) do
               {:ok, %{mtime: mtime}} ->
                 mtime_dt = NaiveDateTime.from_erl!(mtime) |> DateTime.from_naive!("Etc/UTC")
                 age_seconds = DateTime.diff(DateTime.utc_now(), mtime_dt)
 
+                # Only clean directories older than 5 minutes
                 if age_seconds > 300 do
                   Logger.info("Cleaning stale directory: #{path}")
                   File.rm_rf!(path)
                   count + 1
                 else
+                  Logger.debug("Preserving recent directory: #{path} (age: #{age_seconds}s)")
                   count
                 end
               _ -> count

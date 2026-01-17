@@ -1,10 +1,10 @@
 defmodule Zypi.Runtime.WSL2 do
   @moduledoc """
   WSL2 runtime for Windows - runs Firecracker inside WSL2.
-  
+
   This provides near-native Firecracker performance on Windows by
   using the actual Linux kernel in WSL2 with nested virtualization.
-  
+
   Requirements:
   - Windows 10 2004+ or Windows 11
   - WSL2 with a Linux distro installed
@@ -57,18 +57,18 @@ defmodule Zypi.Runtime.WSL2 do
 
     # Convert Windows path to WSL path for rootfs
     wsl_rootfs = windows_to_wsl_path(container.rootfs)
-    
+
     # Create VM directory in WSL
     wsl_cmd(["mkdir", "-p", "#{@data_dir}/vms/#{container.id}"])
 
     # Copy rootfs to WSL if needed
     if not String.starts_with?(container.rootfs, "/") do
       wsl_cmd(["cp", wsl_rootfs, "#{@data_dir}/vms/#{container.id}/rootfs.ext4"])
-      wsl_rootfs = "#{@data_dir}/vms/#{container.id}/rootfs.ext4"
+      _wsl_rootfs = "#{@data_dir}/vms/#{container.id}/rootfs.ext4"
     end
 
     socket_path = "#{@data_dir}/vms/#{container.id}/api.sock"
-    
+
     # Build Firecracker command to run in WSL
     mem_mb = get_in(container.resources, [:memory_mb]) || 256
     cpus = get_in(container.resources, [:cpu]) || 1
@@ -80,29 +80,29 @@ defmodule Zypi.Runtime.WSL2 do
     #!/bin/bash
     set -e
     cd #{@data_dir}/vms/#{container.id}
-    
+
     # Start Firecracker
     firecracker --api-sock #{socket_path} &
     FC_PID=$!
     sleep 1
-    
+
     # Configure VM via API
     curl -s --unix-socket #{socket_path} -X PUT http://localhost/boot-source \
       -H 'Content-Type: application/json' \
       -d '{"kernel_image_path": "/opt/zypi/kernel/vmlinux", "boot_args": "console=ttyS0 root=/dev/vda rw init=/sbin/init ip=#{ip_str}::10.0.0.1:255.255.255.0::eth0:off"}'
-    
+
     curl -s --unix-socket #{socket_path} -X PUT http://localhost/machine-config \
       -H 'Content-Type: application/json' \
       -d '{"vcpu_count": #{cpus}, "mem_size_mib": #{mem_mb}}'
-    
+
     curl -s --unix-socket #{socket_path} -X PUT http://localhost/drives/rootfs \
       -H 'Content-Type: application/json' \
       -d '{"drive_id": "rootfs", "path_on_host": "#{wsl_rootfs}", "is_root_device": true, "is_read_only": false}'
-    
+
     curl -s --unix-socket #{socket_path} -X PUT http://localhost/actions \
       -H 'Content-Type: application/json' \
       -d '{"action_type": "InstanceStart"}'
-    
+
     echo $FC_PID > pid
     wait $FC_PID
     """
@@ -135,7 +135,7 @@ defmodule Zypi.Runtime.WSL2 do
 
     # Kill Firecracker in WSL
     wsl_cmd(["pkill", "-f", "firecracker.*#{id}"])
-    
+
     cleanup(id)
     :ok
   end
@@ -170,7 +170,7 @@ defmodule Zypi.Runtime.WSL2 do
     echo 1 > /proc/sys/net/ipv4/ip_forward
     iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -j MASQUERADE 2>/dev/null || true
     """])
-    
+
     {:ok, %{mode: :wsl_bridge, container_id: container_id, ip: ip}}
   end
 

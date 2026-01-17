@@ -58,15 +58,29 @@ defmodule Zypi.Image.InitGenerator do
     File.mkdir_p!(dir)
 
     if File.exists?(@agent_binary_path) do
+      Logger.info("InitGenerator: Copying agent from #{@agent_binary_path} to #{dest}")
+
       case File.cp(@agent_binary_path, dest) do
         :ok ->
           File.chmod!(dest, 0o755)
-          :ok
-        error -> error
+
+          # Verify the copy
+          case File.stat(dest) do
+            {:ok, %{size: size}} ->
+              Logger.info("InitGenerator: Agent installed successfully (#{size} bytes)")
+              :ok
+            {:error, reason} ->
+              Logger.error("InitGenerator: Failed to stat agent after copy: #{inspect(reason)}")
+              {:error, reason}
+          end
+        error ->
+          Logger.error("InitGenerator: Failed to copy agent: #{inspect(error)}")
+          error
       end
     else
-      Logger.warning("Guest agent binary not found at #{@agent_binary_path}")
-      :ok
+      Logger.error("InitGenerator: Guest agent binary not found at #{@agent_binary_path}")
+      Logger.error("InitGenerator: VMs will boot but agent won't be available!")
+      :ok # Continue anyway but log the error
     end
   end
 

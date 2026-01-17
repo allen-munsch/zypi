@@ -48,6 +48,27 @@ defmodule Zypi.Runtime.Firecracker do
     socket_path = Path.join(vm_path, "api.sock")
     File.rm(socket_path)
 
+    # Log the paths and configuration
+    Logger.debug("Firecracker: VM path: #{vm_path}")
+    Logger.debug("Firecracker: Socket path: #{socket_path}")
+    Logger.debug("Firecracker: Rootfs: #{container.rootfs}")
+    Logger.debug("Firecracker: Kernel: #{ @kernel_path}")
+
+    # Verify required files exist
+    cond do
+      not File.exists?(container.rootfs) ->
+        Logger.error("Firecracker: Rootfs not found: #{container.rootfs}")
+        {:error, {:rootfs_not_found, container.rootfs}}
+      not File.exists?(@kernel_path) ->
+        Logger.error("Firecracker: Kernel not found: #{ @kernel_path}")
+        {:error, {:kernel_not_found, @kernel_path}}
+      true ->
+        # Continue with VM startup
+        do_start_vm(container, vm_path, socket_path)
+    end
+  end
+
+  defp do_start_vm(container, _vm_path, socket_path) do
     tap_name = "ztap#{:erlang.phash2(container.id, 9999)}"
 
     with {:ok, tap} <- setup_tap(container.id, container.ip),
@@ -55,18 +76,19 @@ defmodule Zypi.Runtime.Firecracker do
          :ok <- wait_for_socket(socket_path),
          :ok <- configure_vm(socket_path, container, tap),
          :ok <- start_instance(socket_path) do
-
-      {:ok, %{
-        socket_path: socket_path,
-        pid: fc_port,
-        tap_device: tap,
-        container_ip: container.ip
-      }}
+      Logger.info("Firecracker: VM #{container.id} started successfully")
+      {:ok,
+       %{
+         socket_path: socket_path,
+         pid: fc_port,
+         tap_device: tap,
+         container_ip: container.ip
+       }}
     else
-      {:error, reason} ->
-        Logger.error("Firecracker: VM start failed: #{inspect(reason)}")
+      {:error, reason} = err ->
+        Logger.error("Firecracker: VM start failed for #{container.id}: #{inspect(reason)}")
         cleanup_network(tap_name)
-        {:error, reason}
+        err
     end
   end
 
@@ -169,21 +191,63 @@ defmodule Zypi.Runtime.Firecracker do
   end
 
   defp spawn_firecracker(socket_path) do
-    port = Port.open({:spawn_executable, firecracker_path()},
-      [:binary,
-       :exit_status,
-       :stderr_to_stdout,
-       args: ["--api-sock", socket_path]
+    fc_binary = firecracker_path()
+    Logger.debug("Firecracker: Binary path: #{fc_binary}")
+    Logger.debug("Firecracker: Binary exists? #{File.exists?(fc_binary)}")
+
+    # Check if firecracker is executable
+    case System.cmd("which", ["firecracker"], stderr_to_stdout: true) do
+      {path, 0} ->
+        Logger.debug("Firecracker: Found at #{String.trim(path)}")
+      {_, _} ->
+        Logger.warning("Firecracker: 'which firecracker' failed")
+    end
+
+    args = ["--api-sock", socket_path]
+    Logger.debug("Firecracker: Spawning with args: #{inspect(args)}")
+
+    port =
+      Port.open({:spawn_executable, fc_binary}, [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        args: args
       ])
-    Process.sleep(100)
-    {:ok, port}
+
+    # Give it a moment to start and check for immediate failure
+    Process.sleep(200)
+
+    # Check if port is still alive
+    case Port.info(port) do
+      nil ->
+        Logger.error("Firecracker: Process died immediately after spawn")
+        {:error, :firecracker_died_immediately}
+      info ->
+        Logger.debug("Firecracker: Port info: #{inspect(info)}")
+        {:ok, port}
+    end
   end
 
   defp wait_for_socket(path, attempts \\ 100) do
+    Logger.debug("Firecracker: Waiting for socket #{path} (attempt #{101 - attempts})")
+
     cond do
-      File.exists?(path) -> :ok
-      attempts <= 0 -> {:error, :socket_timeout}
-      true -> Process.sleep(10); wait_for_socket(path, attempts - 1)
+      File.exists?(path) ->
+        Logger.debug("Firecracker: Socket #{path} is ready")
+        :ok
+      attempts <= 0 ->
+        Logger.error("Firecracker: Socket timeout - #{path} never appeared")
+        # List the directory contents for debugging
+        case File.ls(Path.dirname(path)) do
+          {:ok, files} ->
+            Logger.debug("Firecracker: Directory contents: #{inspect(files)}")
+          {:error, reason} ->
+            Logger.debug("Firecracker: Cannot list dir: #{inspect(reason)}")
+        end
+        {:error, :socket_timeout}
+      true ->
+        Process.sleep(10)
+        wait_for_socket(path, attempts - 1)
     end
   end
 
@@ -195,34 +259,64 @@ defmodule Zypi.Runtime.Firecracker do
     ip_str = "#{a}.#{b}.#{c}.#{d}"
     gateway = "#{a}.#{b}.#{c}.1"
 
-    boot_args = [
-      "console=ttyS0", "reboot=k", "panic=1", "pci=off",
-      "root=/dev/vda", "rw", "init=/sbin/init",
-      "ip=#{ip_str}::#{gateway}:255.255.255.0::eth0:off"
-    ] |> Enum.join(" ")
+    boot_args =
+      [
+        "console=ttyS0",
+        "reboot=k",
+        "panic=1",
+        "pci=off",
+        "root=/dev/vda",
+        "rw",
+        "init=/sbin/init",
+        "ip=#{ip_str}::#{gateway}:255.255.255.0::eth0:off"
+      ]
+      |> Enum.join(" ")
 
-    with :ok <- api_request(socket_path, :put, "/boot-source", %{
-          kernel_image_path: @kernel_path,
-          boot_args: boot_args
-        }),
-        :ok <- api_request(socket_path, :put, "/machine-config", %{
-          vcpu_count: vcpus,
-          mem_size_mib: mem_mb,
-          smt: false
-        }),
-        :ok <- api_request(socket_path, :put, "/drives/rootfs", %{
-          drive_id: "rootfs",
-          path_on_host: rootfs_path,
-          is_root_device: true,
-          is_read_only: false
-        }),
-        :ok <- api_request(socket_path, :put, "/network-interfaces/eth0", %{
-          iface_id: "eth0",
-          host_dev_name: tap,
-          guest_mac: mac_for_id(container.id)
-        }) do
+    Logger.debug("Firecracker: Configuring VM - kernel=#{ @kernel_path}, rootfs=#{rootfs_path}")
+    Logger.debug("Firecracker: Boot args: #{boot_args}")
+    Logger.debug("Firecracker: Resources: vcpus=#{vcpus}, mem=#{mem_mb}MB")
+    Logger.debug("Firecracker: Network: tap=#{tap}, ip=#{ip_str}")
+
+    with :ok <-
+           api_request(socket_path, :put, "/boot-source", %{
+             kernel_image_path: @kernel_path,
+             boot_args: boot_args
+           })
+           |> tap_result("boot-source"),
+         :ok <-
+           api_request(socket_path, :put, "/machine-config", %{
+             vcpu_count: vcpus,
+             mem_size_mib: mem_mb,
+             smt: false
+           })
+           |> tap_result("machine-config"),
+         :ok <-
+           api_request(socket_path, :put, "/drives/rootfs", %{
+             drive_id: "rootfs",
+             path_on_host: rootfs_path,
+             is_root_device: true,
+             is_read_only: false
+           })
+           |> tap_result("drives/rootfs"),
+         :ok <-
+           api_request(socket_path, :put, "/network-interfaces/eth0", %{
+             iface_id: "eth0",
+             host_dev_name: tap,
+             guest_mac: mac_for_id(container.id)
+           })
+           |> tap_result("network-interfaces/eth0") do
       :ok
     end
+  end
+
+  defp tap_result(:ok, endpoint) do
+    Logger.debug("Firecracker: #{endpoint} configured successfully")
+    :ok
+  end
+
+  defp tap_result({:error, reason} = err, endpoint) do
+    Logger.error("Firecracker: #{endpoint} failed: #{inspect(reason)}")
+    err
   end
 
   defp start_instance(socket_path) do
@@ -245,14 +339,27 @@ defmodule Zypi.Runtime.Firecracker do
     case :gen_tcp.connect({:local, socket_path}, 0, [:binary, active: false], 5000) do
       {:ok, socket} ->
         :ok = :gen_tcp.send(socket, request)
-        result = case :gen_tcp.recv(socket, 0, 5000) do
-          {:ok, response} ->
-            if response =~ ~r/HTTP\/1\.[01] (200|204)/, do: :ok, else: {:error, {:http_error, response}}
-          {:error, reason} -> {:error, {:recv_error, reason}}
-        end
+
+        result =
+          case :gen_tcp.recv(socket, 0, 5000) do
+            {:ok, response} ->
+              if response =~ ~r/HTTP\/1\.[01] (200|204)/ do
+                :ok
+              else
+                # Extract error message from response body
+                Logger.error("Firecracker API error response: #{inspect(response)}")
+                {:error, {:http_error, response}}
+              end
+            {:error, reason} ->
+              Logger.error("Firecracker API recv error: #{inspect(reason)}")
+              {:error, {:recv_error, reason}}
+          end
+
         :gen_tcp.close(socket)
         result
-      {:error, reason} -> {:error, {:connect_error, reason}}
+      {:error, reason} ->
+        Logger.error("Firecracker API connect error to #{socket_path}: #{inspect(reason)}")
+        {:error, {:connect_error, reason}}
     end
   end
 

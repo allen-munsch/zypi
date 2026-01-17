@@ -32,7 +32,7 @@ defmodule Zypi.Container.Manager do
         case container.status do
           :running ->
             ssh_key = Application.get_env(:zypi, :ssh_key_path)
-            
+
             if ssh_key && container.ip do
               {:ok, %{
                 container_id: container_id,
@@ -44,11 +44,11 @@ defmodule Zypi.Container.Manager do
             else
               {:error, :ssh_not_configured}
             end
-            
+
           status ->
             {:error, {:not_running, status}}
         end
-        
+
       {:error, :not_found} = error ->
         error
     end
@@ -83,7 +83,7 @@ defmodule Zypi.Container.Manager do
   def init(_opts) do
     # Clean up any orphaned consoles from previous Manager instances
     cleanup_orphaned_consoles()
-    
+
     Logger.info("Container.Manager initialized (Firecracker runtime)")
     {:ok, %__MODULE__{}}
   end
@@ -92,7 +92,7 @@ defmodule Zypi.Container.Manager do
     # Get all containers from store
     containers = Zypi.Store.Containers.list()
     _container_ids = Enum.map(containers, & &1.id) |> MapSet.new()
-    
+
     # Find all globally registered consoles
     # :global.registered_names() returns all global names
     :global.registered_names()
@@ -103,9 +103,9 @@ defmodule Zypi.Container.Manager do
     |> Enum.each(fn {:zypi_console, vm_id} = name ->
       # If container doesn't exist or isn't running, stop the console
       container = Enum.find(containers, & &1.id == vm_id)
-      
+
       should_stop = cond do
-        is_nil(container) -> 
+        is_nil(container) ->
           Logger.debug("Cleaning up orphaned console for non-existent container #{vm_id}")
           true
         container.status not in [:running, :starting] ->
@@ -114,11 +114,11 @@ defmodule Zypi.Container.Manager do
         true ->
           false
       end
-      
+
       if should_stop do
         case :global.whereis_name(name) do
           :undefined -> :ok
-          pid -> 
+          pid ->
             try do
               GenServer.stop(pid, :normal, 1000)
             catch
@@ -140,10 +140,13 @@ defmodule Zypi.Container.Manager do
   def handle_call({:start, id}, _from, state) do
     case do_start(id) do
       {:ok, vm_state} ->
+        # Get the port from vm_state - it's called :pid not :fc_port
+        fc_port = vm_state[:pid]  # The Firecracker port
+
         state = %{state |
           outputs: Map.put(state.outputs, id, []),
           vm_states: Map.put(state.vm_states, id, vm_state),
-          port_to_container: Map.put(state.port_to_container, vm_state.fc_port, id)
+          port_to_container: Map.put(state.port_to_container, fc_port, id)
         }
         {:reply, {:ok, id}, state}
       error ->
@@ -163,14 +166,14 @@ defmodule Zypi.Container.Manager do
   def handle_call({:destroy, id}, _from, state) do
     vm_state = Map.get(state.vm_states, id)
     result = do_destroy(id, vm_state)
-    
+
     # Clean up port mapping
     port_to_container = if vm_state && vm_state.fc_port do
       Map.delete(state.port_to_container, vm_state.fc_port)
     else
       state.port_to_container
     end
-    
+
     state = %{state |
       outputs: Map.delete(state.outputs, id),
       subscribers: Map.delete(state.subscribers, id),
@@ -228,16 +231,16 @@ defmodule Zypi.Container.Manager do
       nil ->
         Logger.debug("Unknown port exited with status #{status}")
         {:noreply, state}
-      
+
       container_id ->
         Logger.info("VM #{container_id} port exited with status #{status}")
         Containers.update(container_id, %{status: :exited})
-        
+
         # Notify Console and subscribers
         exit_msg = "\r\n[VM exited with status #{status}]\r\n"
         Zypi.Container.Console.forward_output(container_id, exit_msg)
         broadcast_output(state, container_id, exit_msg)
-        
+
         # Clean up port mapping
         state = %{state | port_to_container: Map.delete(state.port_to_container, port)}
         {:noreply, state}
@@ -250,11 +253,11 @@ defmodule Zypi.Container.Manager do
       nil ->
         Logger.debug("Manager received data from unknown port: #{byte_size(data)} bytes")
         {:noreply, state}
-      
+
       container_id ->
         # Forward to Console GenServer for this container
         Zypi.Container.Console.forward_output(container_id, data)
-        
+
         # Also maintain local buffer for logs API and subscribers
         state = buffer_output(state, container_id, data)
         broadcast_output(state, container_id, data)
@@ -362,7 +365,7 @@ defp do_destroy(container_id, vm_state) do
       if container.status == :running and vm_state do
         Runtime.stop(%{container | pid: vm_state})
       end
-      Runtime.cleanup_rootfs(container_id)
+            Runtime.cleanup(container_id)
       Zypi.Pool.ImageStore.destroy_snapshot(container_id)
       if container.ip, do: IPPool.release(container.ip)
       Containers.delete(container_id)
