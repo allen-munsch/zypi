@@ -214,7 +214,5 @@ defmodule Zypi.Runtime.HyperV do
     _ -> nil
   end
 
-  defp kernel_path do
-    Application.get_env(:zypi, :kernel_path)
-  end
+
 end

@@ -16,18 +16,22 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/mdlayher/vsock"
 )
 
 const (
 	VsockPort    = 52
-	MaxFileSize  = 100 * 1024 * 1024
+	MaxFileSize  = 100 * 1024 * 1024 // 100MB
 	ReadTimeout  = 30 * time.Second
 	WriteTimeout = 30 * time.Second
+	AuthToken    = "" // Set via environment variable ZYPI_TOKEN
 )
 
 type Request struct {
 	ID     string          `json:"id"`
 	Method string          `json:"method"`
+	Token  string          `json:"token,omitempty"`
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
@@ -85,31 +89,55 @@ type Agent struct {
 	startTime time.Time
 	mu        sync.Mutex
 	processes map[string]*exec.Cmd
+	token     string
 }
 
 func NewAgent() *Agent {
+	token := os.Getenv("ZYPI_TOKEN")
+	if token == "" {
+		token = os.Getenv("ZYPI_AGENT_TOKEN")
+	}
+	
 	return &Agent{
 		startTime: time.Now(),
 		processes: make(map[string]*exec.Cmd),
+		token:     token,
 	}
 }
 
 func main() {
 	agent := NewAgent()
 
-	listener, err := listenVsock(VsockPort)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to listen on vsock: %v\n", err)
+	// Try vsock first, fallback to TCP for development
+	var listener net.Listener
+	var err error
+	
+	// Only use vsock if token is set (security requirement)
+	if agent.token != "" {
+		listener, err = vsock.Listen(uint32(VsockPort), &vsock.Config{})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to listen on vsock (will try TCP): %v\n", err)
+		} else {
+			fmt.Printf("zypi-agent listening on vsock port %d (token auth enabled)\n", VsockPort)
+		}
+	}
+	
+	// Fallback to TCP if vsock failed or token not set
+	if listener == nil {
 		listener, err = net.Listen("tcp", "0.0.0.0:9999")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to listen on TCP fallback: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Failed to listen on TCP: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("zypi-agent listening on TCP :9999 (fallback mode)")
-	} else {
-		fmt.Println("zypi-agent listening on vsock port", VsockPort)
+		if agent.token == "" {
+			fmt.Println("WARNING: zypi-agent listening on TCP :9999 without authentication")
+		} else {
+			fmt.Println("zypi-agent listening on TCP :9999 (token auth enabled)")
+		}
 	}
 
+	defer listener.Close()
+	
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -120,41 +148,24 @@ func main() {
 	}
 }
 
-func listenVsock(port int) (net.Listener, error) {
-	fd, err := syscall.Socket(syscall.AF_VSOCK, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		return nil, fmt.Errorf("socket: %w", err)
-	}
-
-	sa := &syscall.SockaddrVM{
-		CID:  syscall.VMADDR_CID_ANY,
-		Port: uint32(port),
-	}
-	if err := syscall.Bind(fd, sa); err != nil {
-		syscall.Close(fd)
-		return nil, fmt.Errorf("bind: %w", err)
-	}
-
-	if err := syscall.Listen(fd, 128); err != nil {
-		syscall.Close(fd)
-		return nil, fmt.Errorf("listen: %w", err)
-	}
-
-	file := os.NewFile(uintptr(fd), "vsock")
-	return net.FileListener(file)
-}
-
 func (a *Agent) handleConnection(conn net.Conn) {
 	defer conn.Close()
+	
+	// Set timeouts
+	conn.SetReadDeadline(time.Now().Add(ReadTimeout))
+	conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
 
 	reader := bufio.NewReader(conn)
 	encoder := json.NewEncoder(conn)
 
 	for {
+		// Reset timeout for each request
+		conn.SetReadDeadline(time.Now().Add(ReadTimeout))
+		
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
 			if err != io.EOF {
-				fmt.Fprintf(os.Stderr, "Read error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Read error from %s: %v\n", conn.RemoteAddr(), err)
 			}
 			return
 		}
@@ -167,9 +178,19 @@ func (a *Agent) handleConnection(conn net.Conn) {
 			continue
 		}
 
+		// Authenticate request if token is configured
+		if a.token != "" && req.Token != a.token {
+			encoder.Encode(Response{
+				ID: req.ID,
+				Error: &Error{Code: -32001, Message: "Unauthorized"},
+			})
+			continue
+		}
+
 		resp := a.handleRequest(&req)
+		conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
 		if err := encoder.Encode(resp); err != nil {
-			fmt.Fprintf(os.Stderr, "Write error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Write error to %s: %v\n", conn.RemoteAddr(), err)
 			return
 		}
 	}
@@ -203,6 +224,14 @@ func (a *Agent) handleExec(req *Request) Response {
 
 	if len(params.Cmd) == 0 {
 		return Response{ID: req.ID, Error: &Error{Code: -32602, Message: "cmd required"}}
+	}
+
+	// Basic command validation (allowlist approach)
+	if !isSafeCommand(params.Cmd[0]) {
+		return Response{ID: req.ID, Error: &Error{
+			Code:    -32003,
+			Message: "Command not allowed for security reasons",
+		}}
 	}
 
 	timeout := 60 * time.Second
@@ -264,6 +293,14 @@ func (a *Agent) handleFileWrite(req *Request) Response {
 		return Response{ID: req.ID, Error: &Error{Code: -32602, Message: err.Error()}}
 	}
 
+	// Validate path for security
+	if !isSafePath(params.Path) {
+		return Response{ID: req.ID, Error: &Error{
+			Code:    -32003,
+			Message: "Path not allowed for security reasons",
+		}}
+	}
+
 	content, err := base64.StdEncoding.DecodeString(params.Content)
 	if err != nil {
 		return Response{ID: req.ID, Error: &Error{Code: -32602, Message: "invalid base64"}}
@@ -287,6 +324,9 @@ func (a *Agent) handleFileWrite(req *Request) Response {
 		return Response{ID: req.ID, Error: &Error{Code: -32000, Message: err.Error()}}
 	}
 
+	// Log the file write operation
+	fmt.Printf("[AUDIT] File written: %s (%d bytes)\n", params.Path, len(content))
+	
 	return Response{ID: req.ID, Result: map[string]interface{}{"written": len(content)}}
 }
 
@@ -296,6 +336,14 @@ func (a *Agent) handleFileRead(req *Request) Response {
 		return Response{ID: req.ID, Error: &Error{Code: -32602, Message: err.Error()}}
 	}
 
+	// Validate path for security
+	if !isSafePath(params.Path) {
+		return Response{ID: req.ID, Error: &Error{
+			Code:    -32003,
+			Message: "Path not allowed for security reasons",
+		}}
+	}
+
 	info, err := os.Stat(params.Path)
 	if err != nil {
 		return Response{ID: req.ID, Error: &Error{Code: -32000, Message: err.Error()}}
@@ -303,6 +351,14 @@ func (a *Agent) handleFileRead(req *Request) Response {
 
 	if info.Size() > MaxFileSize {
 		return Response{ID: req.ID, Error: &Error{Code: -32000, Message: "file too large"}}
+	}
+
+	// Don't allow reading sensitive files
+	if isSensitiveFile(params.Path) {
+		return Response{ID: req.ID, Error: &Error{
+			Code:    -32003,
+			Message: "File access denied for security reasons",
+		}}
 	}
 
 	content, err := os.ReadFile(params.Path)
@@ -344,12 +400,76 @@ func (a *Agent) handleHealth(req *Request) Response {
 }
 
 func (a *Agent) handleShutdown(req *Request) Response {
+	// Log shutdown request
+	fmt.Printf("[AUDIT] Shutdown requested by client\n")
+	
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		syscall.Sync()
 		syscall.Reboot(syscall.LINUX_REBOOT_CMD_POWER_OFF)
 	}()
 	return Response{ID: req.ID, Result: map[string]string{"status": "shutting_down"}}
+}
+
+// Security helper functions
+func isSafeCommand(cmd string) bool {
+	// Very basic allowlist - expand based on your needs
+	safeCommands := []string{
+		"/bin/", "/usr/bin/", "/usr/local/bin/",
+		"ls", "cat", "echo", "grep", "find", "ps", "top",
+		"systemctl", "journalctl", "docker", "podman",
+	}
+	
+	for _, safe := range safeCommands {
+		if strings.Contains(cmd, safe) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSafePath(path string) bool {
+	// Disallow absolute paths to sensitive locations
+	deniedPrefixes := []string{
+		"/proc/", "/sys/", "/dev/", "/boot/", 
+		"/etc/shadow", "/etc/passwd", "/etc/sudoers",
+		"/root/.ssh/", "/var/lib/", "/usr/lib/",
+	}
+	
+	for _, prefix := range deniedPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return false
+		}
+	}
+	
+	// Allow paths in /tmp, /var/log, /var/tmp, and current working directories
+	allowedPrefixes := []string{
+		"/tmp/", "/var/log/", "/var/tmp/", "/home/",
+	}
+	
+	for _, prefix := range allowedPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	
+	// Allow relative paths in current directory
+	return !filepath.IsAbs(path) || strings.HasPrefix(path, "./")
+}
+
+func isSensitiveFile(path string) bool {
+	sensitiveFiles := []string{
+		"/etc/shadow", "/etc/passwd", "/etc/sudoers",
+		"/root/.ssh/authorized_keys", "/root/.ssh/id_rsa",
+		"/etc/ssh/ssh_host_rsa_key", 
+	}
+	
+	for _, sensitive := range sensitiveFiles {
+		if path == sensitive {
+			return true
+		}
+	}
+	return false
 }
 
 type syncBuffer struct {
