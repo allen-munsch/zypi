@@ -8,6 +8,8 @@ defmodule Zypi.API.Router do
   alias Zypi.API.ConsoleSocket
   alias Zypi.Store.Images, as: StoreImages
   alias Zypi.Image.Importer, as: ImageImporter
+  alias Zypi.Executor
+  alias Zypi.Pool.VMPool
 
   defmodule Zypi.API.RequestTimer do
     @behaviour Plug
@@ -249,6 +251,128 @@ end
     end
   end
 
+
+  get "/debug/vmpool" do
+    stats = VMPool.stats()
+    vm_ids = try do
+      Zypi.Pool.VMPool.active_vm_ids()
+    rescue
+      _ -> []
+    catch
+      :exit, _ -> []
+    end
+
+    send_json(conn, 200, %{
+      stats: stats,
+      vm_ids: vm_ids,
+      timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+    })
+  end
+
+  get "/debug/containers" do
+    containers = Zypi.Store.Containers.list()
+    |> Enum.map(fn c ->
+      %{
+        id: c.id,
+        status: c.status,
+        ip: format_ip(c.ip),
+        image: c.image,
+        created_at: c.created_at && DateTime.to_iso8601(c.created_at)
+      }
+    end)
+
+    send_json(conn, 200, %{
+      containers: containers,
+      count: length(containers),
+      timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+    })
+  end
+
+  get "/debug/images" do
+    images = Zypi.Store.Images.list()
+    |> Enum.map(fn img ->
+      %{
+        ref: img.ref,
+        status: img.status,
+        progress: img.progress,
+        size_bytes: img.size_bytes,
+        device: img.device
+      }
+    end)
+
+    send_json(conn, 200, %{
+      images: images,
+      count: length(images),
+      timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+    })
+  end
+
+  get "/debug/cleanup" do
+    stats = Zypi.System.Cleanup.stats()
+    send_json(conn, 200, stats)
+  end
+
+  post "/debug/cleanup/run" do
+    case Zypi.System.Cleanup.run_cleanup() do
+      {:ok, stats} -> send_json(conn, 200, %{status: "ok", stats: stats})
+      error -> send_json(conn, 500, %{error: inspect(error)})
+    end
+  end
+
+  # Test agent connectivity directly
+  get "/debug/agent/:container_id" do
+    # Try to get container from store
+    container_result = Zypi.Store.Containers.get(container_id)
+
+    # Try to find in VMPool
+    vm_pool_ids = try do
+      Zypi.Pool.VMPool.active_vm_ids()
+    rescue
+      _ -> []
+    catch
+      :exit, _ -> []
+    end
+
+    in_pool = container_id in vm_pool_ids
+
+    result = %{
+      container_id: container_id,
+      in_store: match?({:ok, _}, container_result),
+      in_pool: in_pool,
+      store_data: case container_result do
+        {:ok, c} -> %{id: c.id, ip: format_ip(c.ip), status: c.status}
+        _ -> nil
+      end
+    }
+
+    send_json(conn, 200, result)
+  end
+
+  # Test direct agent call with explicit IP
+  post "/debug/agent/call" do
+    ip = conn.body_params["ip"]
+    method = conn.body_params["method"] || "health"
+    params = conn.body_params["params"] || %{}
+
+    if is_nil(ip) do
+      send_json(conn, 400, %{error: "ip required"})
+    else
+      result = try do
+        Zypi.Container.Agent.call("debug", method, params, ip: ip)
+      rescue
+        e -> {:error, Exception.message(e)}
+      catch
+        kind, reason -> {:error, {kind, reason}}
+      end
+
+      case result do
+        {:ok, data} -> send_json(conn, 200, %{status: "ok", result: data})
+        {:error, reason} -> send_json(conn, 500, %{error: inspect(reason)})
+      end
+    end
+  end
+
+
   defp stream_body_to_file(conn, file_path, opts \\ []) do
     chunk_size = Keyword.get(opts, :chunk_size, 1_048_576)  # 1MB chunks
     max_size = Keyword.get(opts, :max_size, 500_000_000)    # 500MB max
@@ -280,6 +404,40 @@ end
 
   defp stream_chunks(_conn, _file, total_read, _chunk_size, max_size) when total_read >= max_size do
     {:error, :body_too_large}
+  end
+
+  post "/exec" do
+    cmd = conn.body_params["cmd"]
+
+    if is_nil(cmd) or not is_list(cmd) do
+      send_json(conn, 400, %{error: "cmd must be a list of strings"})
+    else
+      opts = [
+        image: conn.body_params["image"],
+        env: conn.body_params["env"],
+        workdir: conn.body_params["workdir"],
+        timeout: conn.body_params["timeout"],
+        files: conn.body_params["files"]
+      ] |> Enum.reject(fn {_, v} -> is_nil(v) end)
+
+      case Executor.run(cmd, opts) do
+        {:ok, result} ->
+          send_json(conn, 200, %{
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            duration_ms: result.duration_ms,
+            container_id: result.container_id
+          })
+        {:error, reason} ->
+          send_json(conn, 500, %{error: inspect(reason)})
+      end
+    end
+  end
+
+  get "/pool/stats" do
+    stats = VMPool.stats()
+    send_json(conn, 200, stats)
   end
 
   match _ do

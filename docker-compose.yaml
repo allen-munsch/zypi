@@ -24,11 +24,19 @@ services:
       - ./config/overlaybd.json:/etc/overlaybd/overlaybd.json:ro
       # (Optional, but recommended)
       - /dev:/dev
+      # mount elixir source code
+      - ./lib:/app/lib
+      - ./config:/app/config
+      # guest agent binary
+      - ./guest-agent/zypi-agent:/opt/zypi/bin/zypi-agent
     environment:
       - ZYPI_DATA_DIR=/var/lib/zypi
       - ZYPI_KERNEL_PATH=/opt/zypi/kernel/vmlinux
       - ZYPI_LOG_LEVEL=debug
       - MIX_ENV=dev
+    ports:
+      - "4000:4000"   # API
+      - "4001:4001"   # Console socket
     networks:
       - zypi_net
 

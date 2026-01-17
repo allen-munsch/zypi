@@ -395,31 +395,44 @@ end
     end
   end
 
-
-
   defp build_ext4_image(ref, base_ext4, docker_layers, container_config) do
     layer_hash = hash_layers(docker_layers)
-    cached_path = Path.join( @images_dir, "cache-#{layer_hash}.ext4")
+    cached_path = Path.join(@images_dir, "cache-#{layer_hash}.ext4")
 
-    if File.exists?(cached_path) do
-      Logger.info("Using cached image for layer hash #{layer_hash}")
-      encoded = Base.url_encode64(ref, padding: false)
-      ext4_path = Path.join( @images_dir, "#{encoded}.ext4")
-      {_, 0} = System.cmd("cp", ["--reflink=auto", "--sparse=always", cached_path, ext4_path], stderr_to_stdout: true)
-      :ok = inject_init(ext4_path, container_config)
-      {:ok, ext4_path}
-    else
-      Logger.info("Building new image, will cache as #{layer_hash}")
-      {:ok, ext4_path} = do_build_ext4_image(ref, base_ext4, docker_layers, container_config)
+    try do
+      if File.exists?(cached_path) do
+        Logger.info("Using cached image for layer hash #{layer_hash}")
+        encoded = Base.url_encode64(ref, padding: false)
+        ext4_path = Path.join(@images_dir, "#{encoded}.ext4")
 
-      # Run cache copy async - don't wait for it
-      Task.Supervisor.start_child(Zypi.ImporterTasks, fn ->
-        Logger.debug("Caching image as #{layer_hash}")
-        System.cmd("cp", ["--reflink=auto", "--sparse=always", ext4_path, cached_path], stderr_to_stdout: true)
-        Logger.debug("Cache complete for #{layer_hash}")
-      end)
+        with {_, 0} <- System.cmd("cp", ["--reflink=auto", "--sparse=always", cached_path, ext4_path], stderr_to_stdout: true),
+            :ok <- Zypi.Image.InitGenerator.inject(ext4_path, container_config) do
+          {:ok, ext4_path}
+        else
+          {error_output, exit_code} ->
+            File.rm(ext4_path)  # Try to clean up
+            {:error, "cp failed with exit #{exit_code}: #{error_output}"}
 
-      {:ok, ext4_path}
+          {:error, reason} ->
+            File.rm(ext4_path)  # Try to clean up
+            {:error, "init injection failed: #{reason}"}
+        end
+      else
+        Logger.info("Building new image, will cache as #{layer_hash}")
+        {:ok, ext4_path} = do_build_ext4_image(ref, base_ext4, docker_layers, container_config)
+
+        # Run cache copy async - don't wait for it
+        Task.Supervisor.start_child(Zypi.ImporterTasks, fn ->
+          Logger.debug("Caching image as #{layer_hash}")
+          System.cmd("cp", ["--reflink=auto", "--sparse=always", ext4_path, cached_path], stderr_to_stdout: true)
+          Logger.debug("Cache complete for #{layer_hash}")
+        end)
+
+        {:ok, ext4_path}
+      end
+    rescue
+      error ->
+        {:error, "unexpected error: #{inspect(error)}"}
     end
   end
 
@@ -502,7 +515,7 @@ end
         # Inject init
         inject_start = System.monotonic_time(:millisecond)
         Logger.info("Injecting init script...")
-        :ok = inject_init(ext4_path, container_config)
+        :ok = Zypi.Image.InitGenerator.inject(ext4_path, container_config)
         inject_time = System.monotonic_time(:millisecond) - inject_start
         Logger.info("Init injected in #{inject_time}ms")
         {:ok, ext4_path}
@@ -761,117 +774,117 @@ end
     end
   end
 
-  defp inject_init(ext4_path, container_config) do
-    mount_point = "/tmp/zypi-mount-#{System.unique_integer([:positive])}"
-    File.mkdir_p!(mount_point)
+  # defp inject_init(ext4_path, container_config) do
+  #   mount_point = "/tmp/zypi-mount-#{System.unique_integer([:positive])}"
+  #   File.mkdir_p!(mount_point)
 
-    try do
-      {_, 0} = System.cmd("mount", ["-o", "loop", ext4_path, mount_point], stderr_to_stdout: true)
+  #   try do
+  #     {_, 0} = System.cmd("mount", ["-o", "loop", ext4_path, mount_point], stderr_to_stdout: true)
 
-      # Create directories
-      Enum.each(~w[sbin etc/zypi root/.ssh], fn dir ->
-        File.mkdir_p!(Path.join(mount_point, dir))
-      end)
+  #     # Create directories
+  #     Enum.each(~w[sbin etc/zypi root/.ssh], fn dir ->
+  #       File.mkdir_p!(Path.join(mount_point, dir))
+  #     end)
 
-      # Nuke Ubuntu's dynamic MOTD system
-      File.write!(Path.join(mount_point, "etc/legal"), "")
-      update_motd_dir = Path.join(mount_point, "etc/update-motd.d")
-      File.rm_rf(update_motd_dir)
-      File.mkdir_p!(update_motd_dir)
+  #     # Nuke Ubuntu's dynamic MOTD system
+  #     File.write!(Path.join(mount_point, "etc/legal"), "")
+  #     update_motd_dir = Path.join(mount_point, "etc/update-motd.d")
+  #     File.rm_rf(update_motd_dir)
+  #     File.mkdir_p!(update_motd_dir)
 
-      # Write init script
-      init_script = generate_init_script(container_config)
-      init_path = Path.join(mount_point, "sbin/zypi-init")
-      File.write!(init_path, init_script)
-      File.chmod!(init_path, 0o755)
+  #     # Write init script
+  #     init_script = generate_init_script(container_config)
+  #     init_path = Path.join(mount_point, "sbin/zypi-init")
+  #     File.write!(init_path, init_script)
+  #     File.chmod!(init_path, 0o755)
 
-      # Symlink /sbin/init -> zypi-init
-      sbin_init = Path.join(mount_point, "sbin/init")
-      File.rm(sbin_init)
-      File.ln_s!("zypi-init", sbin_init)
+  #     # Symlink /sbin/init -> zypi-init
+  #     sbin_init = Path.join(mount_point, "sbin/init")
+  #     File.rm(sbin_init)
+  #     File.ln_s!("zypi-init", sbin_init)
 
-      # Copy SSH authorized keys
-      ssh_key_path = Application.get_env(:zypi, :ssh_key_path)
-      if ssh_key_path && File.exists?("#{ssh_key_path}.pub") do
-        pub_key = File.read!("#{ssh_key_path}.pub")
-        auth_keys = Path.join(mount_point, "root/.ssh/authorized_keys")
-        File.write!(auth_keys, pub_key)
-        File.chmod!(auth_keys, 0o600)
-      end
+  #     # Copy SSH authorized keys
+  #     ssh_key_path = Application.get_env(:zypi, :ssh_key_path)
+  #     if ssh_key_path && File.exists?("#{ssh_key_path}.pub") do
+  #       pub_key = File.read!("#{ssh_key_path}.pub")
+  #       auth_keys = Path.join(mount_point, "root/.ssh/authorized_keys")
+  #       File.write!(auth_keys, pub_key)
+  #       File.chmod!(auth_keys, 0o600)
+  #     end
 
-      # Write container config
-      config_path = Path.join(mount_point, "etc/zypi/config.json")
-      File.write!(config_path, Jason.encode!(container_config))
+  #     # Write container config
+  #     config_path = Path.join(mount_point, "etc/zypi/config.json")
+  #     File.write!(config_path, Jason.encode!(container_config))
 
-      :ok
-    after
-      System.cmd("umount", [mount_point], stderr_to_stdout: true)
-      File.rmdir(mount_point)
-    end
-  end
+  #     :ok
+  #   after
+  #     System.cmd("umount", [mount_point], stderr_to_stdout: true)
+  #     File.rmdir(mount_point)
+  #   end
+  # end
 
-  defp generate_init_script(config) do
-    entrypoint = Map.get(config, :entrypoint) || []
-    cmd = Map.get(config, :cmd) || []
-    env = Map.get(config, :env) || []
-    workdir = Map.get(config, :workdir) || "/"
+  # defp generate_init_script(config) do
+  #   entrypoint = Map.get(config, :entrypoint) || []
+  #   cmd = Map.get(config, :cmd) || []
+  #   env = Map.get(config, :env) || []
+  #   workdir = Map.get(config, :workdir) || "/"
 
-    env_exports = env |> Enum.map(&"export #{&1}") |> Enum.join("\n")
+  #   env_exports = env |> Enum.map(&"export #{&1}") |> Enum.join("\n")
 
-    main_cmd = case {entrypoint, cmd} do
-      {[], []} -> nil
-      {[], c} -> shell_escape(c)
-      {e, []} -> shell_escape(e)
-      {e, c} -> shell_escape(e ++ c)
-    end
+  #   main_cmd = case {entrypoint, cmd} do
+  #     {[], []} -> nil
+  #     {[], c} -> shell_escape(c)
+  #     {e, []} -> shell_escape(e)
+  #     {e, c} -> shell_escape(e ++ c)
+  #   end
 
-    main_section = if main_cmd, do: "cd #{workdir}\n(#{main_cmd}) &", else: "cd #{workdir}"
+  #   main_section = if main_cmd, do: "cd #{workdir}\n(#{main_cmd}) &", else: "cd #{workdir}"
 
-    motd_banner = ~S"""
-    ╔═══════════════════════════════════════════════════════════════╗
-    ║                                                               ║
-    ║   ███████╗██╗   ██╗██████╗ ██╗                                ║
-    ║   ╚══███╔╝╚██╗ ██╔╝██╔══██╗██║                                ║
-    ║     ███╔╝  ╚████╔╝ ██████╔╝██║                                ║
-    ║    ███╔╝    ╚██╔╝  ██╔═══╝ ██║                                ║
-    ║   ███████╗   ██║   ██║     ██║                                ║
-    ║   ╚══════╝   ╚═╝   ╚═╝     ╚═╝                                ║
-    ║                                                               ║
-    ║   ⚡ Firecracker microVM · Sub-second boot · CoW snapshots    ║
-    ║                                                               ║
-    ╚═══════════════════════════════════════════════════════════════╝
-    """
+  #   motd_banner = ~S"""
+  #   ╔═══════════════════════════════════════════════════════════════╗
+  #   ║                                                               ║
+  #   ║   ███████╗██╗   ██╗██████╗ ██╗                                ║
+  #   ║   ╚══███╔╝╚██╗ ██╔╝██╔══██╗██║                                ║
+  #   ║     ███╔╝  ╚████╔╝ ██████╔╝██║                                ║
+  #   ║    ███╔╝    ╚██╔╝  ██╔═══╝ ██║                                ║
+  #   ║   ███████╗   ██║   ██║     ██║                                ║
+  #   ║   ╚══════╝   ╚═╝   ╚═╝     ╚═╝                                ║
+  #   ║                                                               ║
+  #   ║   ⚡ Firecracker microVM · Sub-second boot · CoW snapshots    ║
+  #   ║                                                               ║
+  #   ╚═══════════════════════════════════════════════════════════════╝
+  #   """
 
-    """
-    #!/bin/sh
-    touch /var/log/lastlog
-    mount -t proc proc /proc 2>/dev/null
-    mount -t sysfs sysfs /sys 2>/dev/null
-    mount -t devtmpfs devtmpfs /dev 2>/dev/null
-    mkdir -p /dev/pts /dev/shm /run/sshd /var/log
-    mount -t devpts devpts /dev/pts 2>/dev/null
-    mount -t tmpfs tmpfs /run 2>/dev/null
-    ip link set lo up 2>/dev/null
-    ip link set eth0 up 2>/dev/null
-    export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-    export HOME=/root
-    rm -rf /etc/update-motd.d/* 2>/dev/null
-    cat > /etc/motd << 'MOTD'
-    #{motd_banner}
-    MOTD
+  #   """
+  #   #!/bin/sh
+  #   touch /var/log/lastlog
+  #   mount -t proc proc /proc 2>/dev/null
+  #   mount -t sysfs sysfs /sys 2>/dev/null
+  #   mount -t devtmpfs devtmpfs /dev 2>/dev/null
+  #   mkdir -p /dev/pts /dev/shm /run/sshd /var/log
+  #   mount -t devpts devpts /dev/pts 2>/dev/null
+  #   mount -t tmpfs tmpfs /run 2>/dev/null
+  #   ip link set lo up 2>/dev/null
+  #   ip link set eth0 up 2>/dev/null
+  #   export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  #   export HOME=/root
+  #   rm -rf /etc/update-motd.d/* 2>/dev/null
+  #   cat > /etc/motd << 'MOTD'
+  #   #{motd_banner}
+  #   MOTD
 
-    #{env_exports}
-    if [ -x /usr/sbin/sshd ]; then
-      mkdir -p /run/sshd
-      [ ! -f /etc/ssh/ssh_host_rsa_key ] && ssh-keygen -A 2>/dev/null
-      /usr/sbin/sshd -D -e &
-    fi
-    #{main_section}
-    while true; do sleep 60; done
-    """
-  end
+  #   #{env_exports}
+  #   if [ -x /usr/sbin/sshd ]; then
+  #     mkdir -p /run/sshd
+  #     [ ! -f /etc/ssh/ssh_host_rsa_key ] && ssh-keygen -A 2>/dev/null
+  #     /usr/sbin/sshd -D -e &
+  #   fi
+  #   #{main_section}
+  #   while true; do sleep 60; done
+  #   """
+  # end
 
-  defp shell_escape(args) when is_list(args) do
-    Enum.map_join(args, " ", &("'" <> String.replace(&1, "'", "'\\''") <> "'"))
-  end
+  # defp shell_escape(args) when is_list(args) do
+  #   Enum.map_join(args, " ", &("'" <> String.replace(&1, "'", "'\\''") <> "'"))
+  # end
 end
