@@ -8,6 +8,15 @@ It's experimental.
 
 ![demo](docs/demo.gif)
 
+1. A local Firecracker API this simple
+
+```python
+from zypi_client import ZypiClient
+client = ZypiClient('http://localhost:4000')
+exit_code, stdout, stderr = client.exec(['python', 'analyze_data.py'])
+```
+
+Wow, neat!
 
 ```
 03:15:37 jm@pop-os zypi ±|optimize-observe ✗|→ zypi shell test-hello-zippy
