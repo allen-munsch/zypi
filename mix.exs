@@ -5,7 +5,7 @@ defmodule Zypi.MixProject do
     [
       app: :zypi,
       version: "0.1.0",
-      elixir: "~> 1.19.3",
+      elixir: "~> 1.20.0-rc.0",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       elixirc_paths: elixirc_paths(Mix.env())
