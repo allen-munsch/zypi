@@ -1,62 +1,74 @@
 # iron-proxy configuration for Zypi sandbox egress firewall
 #
-# Routes sandbox outbound traffic through a default-deny MITM proxy.
-# Sandboxes can only reach domains explicitly listed in the allowlist.
-# Proxy tokens are swapped for real secrets at the boundary.
+# Default-deny MITM proxy: sandboxes can only reach allowlisted domains.
+# Proxy tokens swapped for real secrets at the boundary.
 
-listen_addr: "0.0.0.0:8080"
-
-# Upstream DNS — proxy resolves hostnames for sandboxes
 dns:
-  listen_addr: "0.0.0.0:5353"
-  upstream: ["8.8.8.8:53", "1.1.1.1:53"]
+  listen: ":5353"
+  proxy_ip: "10.0.0.2"
+  upstream_resolver: "8.8.8.8:53"
 
-# Default-deny: block everything not explicitly allowed
 proxy:
-  default_allow: false
-
+  http_listen: ":8080"
+  https_listen: ":8443"
   # Deny cloud metadata endpoints and internal networks
   upstream_deny_cidrs:
-    - "169.254.169.254/32"   # AWS/cloud IMDS
-    - "10.0.0.0/8"           # Zypi internal bridge network
-    - "127.0.0.0/8"          # Loopback
-    - "::1/128"              # IPv6 loopback
+    - "169.254.169.254/32"
+    - "10.0.0.0/8"
+    - "127.0.0.0/8"
+    - "::1/128"
 
-  # Allowlist — domains sandboxes can reach
-  allow:
-    # Package registries (pip, npm, apt, cargo)
-    - host: "pypi.org"
-    - host: "files.pythonhosted.org"
-    - host: "registry.npmjs.org"
-    - host: "crates.io"
-    - host: "static.crates.io"
-    - host: "github.com"
-    - host: "api.github.com"
-    - host: "objects.githubusercontent.com"
+# TLS — sni-only mode (no CA required, TCP passthrough for HTTPS)
+# For full MITM with secret injection, generate CA certs and use mode: mitm
+tls:
+  mode: "sni-only"
 
-    # AI/LLM APIs (using proxy tokens, NOT real keys)
-    - host: "api.openai.com"
-    - host: "api.anthropic.com"
-    - host: "api.mistral.ai"
-    - host: "generativelanguage.googleapis.com"
+metrics:
+  listen: ":9090"
 
-    # General internet (restrict in production)
-    - host: "httpbin.org"
-    - host: "ifconfig.me"
-    - host: "ident.me"
+transforms:
+  # Default-deny allowlist — only these domains can be reached
+  - name: allowlist
+    config:
+      domains:
+        # Package registries
+        - "pypi.org"
+        - "files.pythonhosted.org"
+        - "registry.npmjs.org"
+        - "crates.io"
+        - "static.crates.io"
+        - "github.com"
+        - "api.github.com"
+        - "objects.githubusercontent.com"
+        # AI/LLM APIs
+        - "api.openai.com"
+        - "api.anthropic.com"
+        - "api.mistral.ai"
+        - "generativelanguage.googleapis.com"
+        # Testing
+        - "httpbin.org"
+        - "ifconfig.me"
+        - "ident.me"
+      cidrs:
+        - "10.0.0.0/24"
 
   # Secret injection — sandboxes use proxy tokens, iron-proxy swaps real creds
+  # Uncomment and set IRON_OPENAI_API_KEY env var to enable
   #
-  # Sandbox code sends: Authorization: Bearer proxy-token-openai
-  # iron-proxy rewrites to: Authorization: Bearer sk-real-key
-  #
-  # secrets:
-  #   - name: "OPENAI_API_KEY"
-  #     proxy_token: "proxy-token-openai"
-  #     real_value: "${OPENAI_API_KEY}"
+  # - name: secrets
+  #   config:
+  #     secrets:
+  #       - source:
+  #           type: env
+  #           var: OPENAI_API_KEY
+  #         proxy_value: "proxy-token-openai"
+  #         match_headers: ["Authorization"]
+  #         match_body: false
+  #         rules:
+  #           - host: "api.openai.com"
 
-  # Per-request audit trail (structured JSON to stdout)
-  audit_log: true
+metrics:
+  listen: ":9091"
 
-# No upstream control plane — standalone mode
-# enrollment_token: ""
+log:
+  level: "info"

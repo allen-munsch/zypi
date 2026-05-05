@@ -7,7 +7,8 @@ services:
       - ./config/iron-proxy/config.yaml:/etc/iron-proxy/config.yaml:ro
       - iron-proxy-certs:/certs
     ports:
-      - "8080:8080"   # HTTP proxy
+      - "8081:8080"     # HTTP proxy (host:8081, sandboxes use 10.0.0.2:8080)
+      - "8443:8443"     # HTTPS proxy (sni-only passthrough)
       - "5353:5353/udp" # DNS
     networks:
       zypi_net:
