@@ -16,7 +16,7 @@ defmodule Zypi.Pool.VMPool do
   @default_max_warm 10
   @default_max_total 50
   @warm_check_interval 5_000
-  @health_check_interval 10_000
+  @health_check_interval 30_000
   defp data_dir, do: Application.get_env(:zypi, :data_dir, "/var/lib/zypi")
 
   defmodule VMSlot do
@@ -29,7 +29,8 @@ defmodule Zypi.Pool.VMPool do
       :image,
       :created_at,
       :assigned_at,
-      :container_id
+      :container_id,
+      health_failures: 0
     ]
   end
 
@@ -328,38 +329,70 @@ defmodule Zypi.Pool.VMPool do
 
   defp ping_agent(ip) do
     ip_str = format_ip(ip)
-    case :gen_tcp.connect(String.to_charlist(ip_str), 9999, [:binary], 2000) do
+    case :gen_tcp.connect(String.to_charlist(ip_str), 9999, [:binary, active: false, packet: :line], 2000) do
       {:ok, socket} ->
-        :gen_tcp.close(socket)
-        :ok
-      {:error, reason} ->
-        {:error, reason}
+        # Send proper JSON-RPC health request — prevents agent goroutine leak
+        # (raw TCP open/close without data causes agent goroutines to hang for 30s)
+        req = Jason.encode!(%{id: "health_ping", method: "health", params: %{}}) <> "\n"
+        :gen_tcp.send(socket, req)
+        case :gen_tcp.recv(socket, 0, 2000) do
+          {:ok, data} ->
+            :gen_tcp.close(socket)
+            case Jason.decode(data) do
+              {:ok, %{"result" => %{"status" => "healthy"}}} -> :ok
+              _ -> {:error, :unhealthy_response}
+            end
+          {:error, reason} ->
+            :gen_tcp.close(socket)
+            {:error, reason}
+        end
+      {:error, reason} -> {:error, reason}
     end
   end
 
   defp check_warm_vm_health(state) do
-    # Only check VMs in the warm queue (not assigned ones)
-    {healthy, unhealthy} = Enum.split_with(state.warm_queue, fn vm_id ->
-      vm = Map.get(state.vms, vm_id)
-      vm && ping_agent(vm.ip) == :ok
-    end)
+    max_failures = 3
 
-    if length(unhealthy) > 0 do
-      Logger.warning("VMPool: Removing #{length(unhealthy)} unhealthy warm VMs: #{inspect(unhealthy)}")
+    # Check each warm VM, update health_failures counter
+    {updated_vms, to_destroy} =
+      Enum.reduce(state.warm_queue, {state.vms, []}, fn vm_id, {vms, destroy} ->
+        vm = Map.get(vms, vm_id)
+        if vm do
+          case ping_agent(vm.ip) do
+            :ok ->
+              # Reset failures on success
+              {Map.put(vms, vm_id, %{vm | health_failures: 0}), destroy}
+            {:error, reason} ->
+              failures = vm.health_failures + 1
+              Logger.debug("VMPool: VM #{vm_id} health check failed (#{failures}/#{max_failures}): #{inspect(reason)}")
+              if failures >= max_failures do
+                Logger.warning("VMPool: VM #{vm_id} failed #{failures} consecutive health checks — destroying")
+                {vms, [vm_id | destroy]}
+              else
+                {Map.put(vms, vm_id, %{vm | health_failures: failures}), destroy}
+              end
+          end
+        else
+          {vms, destroy}
+        end
+      end)
 
-      Enum.each(unhealthy, fn vm_id ->
+    if length(to_destroy) > 0 do
+      Logger.warning("VMPool: Destroying #{length(to_destroy)} unhealthy VMs: #{inspect(to_destroy)}")
+
+      Enum.each(to_destroy, fn vm_id ->
         vm = Map.get(state.vms, vm_id)
         if vm, do: spawn(fn -> destroy_vm(vm) end)
       end)
-
-      %{state |
-        warm_queue: healthy,
-        vms: Map.drop(state.vms, unhealthy),
-        metrics: Map.update(state.metrics, :unhealthy_removed, length(unhealthy), & &1 + length(unhealthy))
-      }
-    else
-      state
     end
+
+    remaining_queue = state.warm_queue -- to_destroy
+
+    %{state |
+      vms: Map.drop(updated_vms, to_destroy),
+      warm_queue: remaining_queue,
+      metrics: Map.update(state.metrics, :unhealthy_removed, length(to_destroy), & &1 + length(to_destroy))
+    }
   end
 
   defp find_warm_vm(state, image) do
@@ -526,20 +559,30 @@ defmodule Zypi.Pool.VMPool do
     Logger.debug("VMPool: Waiting for agent at #{ip_str}:9999")
 
     result =
-      Enum.reduce_while(1..30, {:timeout, 0}, fn attempt, {_, _} ->
-        case :gen_tcp.connect(String.to_charlist(ip_str), 9999, [:binary], 1000) do
+      Enum.reduce_while(1..15, {:timeout, 0}, fn attempt, {_, _} ->
+        case :gen_tcp.connect(String.to_charlist(ip_str), 9999, [:binary, active: false, packet: :line], 500) do
           {:ok, socket} ->
+            # Verify agent is actually responsive with a health RPC
+            req = Jason.encode!(%{id: "boot_ping", method: "health", params: %{}}) <> "\n"
+            :gen_tcp.send(socket, req)
+            result = case :gen_tcp.recv(socket, 0, 500) do
+              {:ok, data} ->
+                case Jason.decode(data) do
+                  {:ok, %{"result" => %{"status" => "healthy"}}} -> {:halt, {:ok, attempt}}
+                  _ -> {:cont, {:timeout, attempt}}
+                end
+              {:error, _} -> {:cont, {:timeout, attempt}}
+            end
             :gen_tcp.close(socket)
-            Logger.debug("VMPool: Agent responded on attempt #{attempt}")
-            {:halt, {:ok, attempt}}
+            result
           {:error, reason} ->
-            if rem(attempt, 5) == 0 do
+            if rem(attempt, 3) == 0 do
               Logger.debug(
-                "VMPool: Agent not ready at #{ip_str}:9999, attempt #{attempt}/30, reason: #{inspect(reason)}"
+                "VMPool: Agent not ready at #{ip_str}:9999, attempt #{attempt}/15, reason: #{inspect(reason)}"
               )
             end
 
-            Process.sleep(500)
+            Process.sleep(200)
             {:cont, {:timeout, attempt}}
         end
       end)
@@ -547,9 +590,9 @@ defmodule Zypi.Pool.VMPool do
     case result do
       {:ok, _attempt} ->
         :ok
-      {:timeout, last_attempt} ->
+      {:timeout, _last_attempt} ->
         Logger.warning(
-          "VMPool: Agent never responded after #{last_attempt} attempts at #{ip_str}:9999"
+          "VMPool: Agent never responded after 15 attempts at #{ip_str}:9999"
         )
 
         {:error, :timeout}
