@@ -169,6 +169,13 @@ defmodule Zypi.Image.InitGenerator do
     ip link set eth0 up 2>/dev/null || true
     sleep 0.5
 
+    # DNS — resolv.conf is stripped during image build. Use gateway as DNS.
+    # The tap bridge (10.0.0.1) forwards to host DNS via iptables MASQUERADE.
+    if [ ! -f /etc/resolv.conf ] || [ ! -s /etc/resolv.conf ]; then
+      echo "nameserver 10.0.0.1" > /etc/resolv.conf
+      echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+    fi
+
     export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     export HOME=/root
     export TERM=linux
