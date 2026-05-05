@@ -22,6 +22,7 @@ defmodule Zypi.Application do
       Zypi.Cluster.Supervisor,
       Zypi.Image.Supervisor,
       Zypi.Container.Supervisor,
+      Zypi.Session.Manager,
       Zypi.Scheduler.Supervisor,
       Zypi.System.Cleanup,
       Zypi.API.Supervisor,

@@ -9,9 +9,9 @@ defmodule Zypi.Runtime.VirtFramework do
   @behaviour Zypi.Runtime.Behaviour
   require Logger
 
-  @data_dir Application.compile_env(:zypi, :data_dir, "~/.zypi") |> Path.expand()
-  @vm_dir Path.join(@data_dir, "vms")
-  @helper_path Application.compile_env(:zypi, :virt_helper_path, "/usr/local/bin/zypi-virt")
+  defp data_dir, do: Application.get_env(:zypi, :data_dir, "~/.zypi") |> Path.expand()
+  defp vm_dir, do: Path.join(data_dir(), "vms")
+  defp configured_helper_path, do: Application.get_env(:zypi, :virt_helper_path, "/usr/local/bin/zypi-virt")
 
   @impl true
   def available? do
@@ -42,14 +42,14 @@ defmodule Zypi.Runtime.VirtFramework do
   end
 
   defp helper_installed? do
-    File.exists?(@helper_path) or System.find_executable("zypi-virt") != nil
+    File.exists?(configured_helper_path()) or System.find_executable("zypi-virt") != nil
   end
 
   @impl true
   def start(container) do
     Logger.info("VirtFramework: Starting VM for #{container.id}")
 
-    vm_path = Path.join(@vm_dir, container.id)
+    vm_path = Path.join(vm_dir(), container.id)
     File.mkdir_p!(vm_path)
 
     config_path = Path.join(vm_path, "config.json")
@@ -119,7 +119,7 @@ defmodule Zypi.Runtime.VirtFramework do
 
   @impl true
   def cleanup(container_id) do
-    vm_path = Path.join(@vm_dir, container_id)
+    vm_path = Path.join(vm_dir(), container_id)
     
     # Kill any running helper
     System.cmd("pkill", ["-f", "zypi-virt.*#{container_id}"], stderr_to_stdout: true)
@@ -167,7 +167,7 @@ defmodule Zypi.Runtime.VirtFramework do
   end
 
   defp helper_path do
-    System.find_executable("zypi-virt") || @helper_path
+    System.find_executable("zypi-virt") || configured_helper_path()
   end
 
   defp format_ip({a, b, c, d}), do: "#{a}.#{b}.#{c}.#{d}"

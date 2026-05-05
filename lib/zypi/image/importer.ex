@@ -4,9 +4,9 @@ defmodule Zypi.Image.Importer do
   require Logger
 
 
-  @data_dir Application.compile_env(:zypi, :data_dir, "/var/lib/zypi")
+  defp data_dir, do: Application.get_env(:zypi, :data_dir, "/var/lib/zypi")
   @base_dir "/opt/zypi/rootfs"
-  @images_dir Path.join( @data_dir, "images")
+  defp images_dir, do: Path.join(data_dir(), "images")
   @base_ext4_cache_key :zypi_base_ext4_cache
   @max_concurrent_imports 2
   @max_layer_retries 3
@@ -39,7 +39,7 @@ defmodule Zypi.Image.Importer do
 
   @impl true
   def init(_opts) do
-    File.mkdir_p!( @images_dir)
+    File.mkdir_p!(images_dir())
     :persistent_term.put( @base_ext4_cache_key, {nil, nil})
 
     # Schedule periodic cleanup
@@ -137,7 +137,7 @@ end
     Logger.debug("Running stale import cleanup")
 
     # Clean up stale work directories
-    imports_dir = Path.join( @data_dir, "imports")
+    imports_dir = Path.join(data_dir(), "imports")
     cleanup_stale_directories(imports_dir)
 
     # Clean up orphaned cache files (no corresponding image in store)
@@ -173,7 +173,7 @@ end
   end
 
   defp cleanup_orphaned_cache_files do
-    case File.ls( @images_dir) do
+    case File.ls(images_dir()) do
       {:ok, files} ->
         cache_files = Enum.filter(files, &String.starts_with?(&1, "cache-"))
         image_files = Enum.filter(files, &String.ends_with?(&1, ".ext4"))
@@ -182,7 +182,7 @@ end
         # Get layer hashes from existing images
         _valid_hashes = image_files
         |> Enum.map(fn f ->
-          Path.join( @images_dir, f)
+          Path.join(images_dir(), f)
         end)
         |> MapSet.new()
 
@@ -285,7 +285,7 @@ end
     Logger.info("=== Starting import #{import_id} for #{ref} ===")
     Logger.info("Tar size: #{Float.round(tar_size / 1_048_576, 2)} MB")
 
-    work_dir = Path.join( @data_dir, "imports/#{System.unique_integer([:positive])}")
+    work_dir = Path.join(data_dir(), "imports/#{System.unique_integer([:positive])}")
     File.mkdir_p!(work_dir)
 
     try do
@@ -397,13 +397,13 @@ end
 
   defp build_ext4_image(ref, base_ext4, docker_layers, container_config) do
     layer_hash = hash_layers(docker_layers)
-    cached_path = Path.join(@images_dir, "cache-#{layer_hash}.ext4")
+    cached_path = Path.join(images_dir(), "cache-#{layer_hash}.ext4")
 
     try do
       if File.exists?(cached_path) do
         Logger.info("Using cached image for layer hash #{layer_hash}")
         encoded = Base.url_encode64(ref, padding: false)
-        ext4_path = Path.join(@images_dir, "#{encoded}.ext4")
+        ext4_path = Path.join(images_dir(), "#{encoded}.ext4")
 
         with {_, 0} <- System.cmd("cp", ["--reflink=auto", "--sparse=always", cached_path, ext4_path], stderr_to_stdout: true),
             :ok <- Zypi.Image.InitGenerator.inject(ext4_path, container_config) do
@@ -459,7 +459,7 @@ end
 
   defp do_build_ext4_image(ref, base_ext4, docker_layers, container_config) do
     encoded = Base.url_encode64(ref, padding: false)
-    ext4_path = Path.join( @images_dir, "#{encoded}.ext4")
+    ext4_path = Path.join(images_dir(), "#{encoded}.ext4")
 
     # Copy base image
     copy_start = System.monotonic_time(:millisecond)

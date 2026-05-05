@@ -406,12 +406,16 @@ end
     {:error, :body_too_large}
   end
 
+  # ── Agent Fabric: One-Shot Sandbox Execution ──────────────────
+
   post "/exec" do
     cmd = conn.body_params["cmd"]
 
     if is_nil(cmd) or not is_list(cmd) do
       send_json(conn, 400, %{error: "cmd must be a list of strings"})
     else
+      agent_id = conn.body_params["agent_id"]
+
       opts = [
         image: conn.body_params["image"],
         env: conn.body_params["env"],
@@ -422,18 +426,145 @@ end
 
       case Executor.run(cmd, opts) do
         {:ok, result} ->
-          send_json(conn, 200, %{
+          response = %{
             exit_code: result.exit_code,
             stdout: result.stdout,
             stderr: result.stderr,
             duration_ms: result.duration_ms,
             container_id: result.container_id
-          })
+          }
+          response = if agent_id, do: Map.put(response, :agent_id, agent_id), else: response
+          send_json(conn, 200, response)
         {:error, reason} ->
           send_json(conn, 500, %{error: inspect(reason)})
       end
     end
   end
+
+  # ── Agent Fabric: Long-Lived Sessions ────────────────────────
+
+  post "/sessions" do
+    agent_id = conn.body_params["agent_id"]
+    image = conn.body_params["image"] || "ubuntu:24.04"
+
+    opts = [
+      vcpus: conn.body_params["vcpus"] || 1,
+      memory_mb: conn.body_params["memory_mb"] || 256,
+      metadata: conn.body_params["metadata"] || %{}
+    ]
+
+    case Zypi.Session.Manager.create(agent_id, image, opts) do
+      {:ok, session} ->
+        send_json(conn, 201, %{
+          session_id: session.id,
+          container_id: session.container_id,
+          ip: format_ip(session.ip),
+          image: session.image,
+          agent_id: session.agent_id,
+          status: "running",
+          created_at: DateTime.to_iso8601(session.created_at)
+        })
+      {:error, reason} ->
+        send_json(conn, 500, %{error: inspect(reason)})
+    end
+  end
+
+  post "/sessions/:id/exec" do
+    cmd = conn.body_params["cmd"]
+
+    if is_nil(cmd) or not is_list(cmd) do
+      send_json(conn, 400, %{error: "cmd must be a list of strings"})
+    else
+      opts = [
+        env: conn.body_params["env"],
+        workdir: conn.body_params["workdir"],
+        timeout: conn.body_params["timeout"] || 30
+      ] |> Enum.reject(fn {_, v} -> is_nil(v) end)
+
+      case Zypi.Session.Manager.exec(id, cmd, opts) do
+        {:ok, result} ->
+          send_json(conn, 200, %{
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            timed_out: result.timed_out || false,
+            session_id: result.session_id,
+            container_id: result.container_id
+          })
+        {:error, reason} ->
+          status = case reason do
+            :session_not_found -> 404
+            {:session_closed, _} -> 410
+            _ -> 500
+          end
+          send_json(conn, status, %{error: inspect(reason)})
+      end
+    end
+  end
+
+  get "/sessions/:id" do
+    case Zypi.Session.Manager.get(id) do
+      {:ok, session} ->
+        send_json(conn, 200, %{
+          session_id: session.id,
+          container_id: session.container_id,
+          ip: format_ip(session.ip),
+          image: session.image,
+          agent_id: session.agent_id,
+          status: session.status,
+          created_at: DateTime.to_iso8601(session.created_at),
+          last_used_at: session.last_used_at && DateTime.to_iso8601(session.last_used_at)
+        })
+      {:error, :not_found} ->
+        send_json(conn, 404, %{error: "session not found"})
+    end
+  end
+
+  get "/sessions" do
+    {:ok, sessions} = Zypi.Session.Manager.list()
+    send_json(conn, 200, %{sessions: sessions, count: length(sessions)})
+  end
+
+  delete "/sessions/:id" do
+    case Zypi.Session.Manager.close(id) do
+      :ok -> send_json(conn, 200, %{status: "closed"})
+      {:error, :not_found} -> send_json(conn, 404, %{error: "session not found"})
+    end
+  end
+
+  get "/sessions/stats" do
+    stats = Zypi.Session.Manager.stats()
+    send_json(conn, 200, stats)
+  end
+
+  # ── Image Pre-Warming (Agent Fabric optimization) ────────────
+
+  post "/images/:ref/warm" do
+    count = (conn.body_params["count"] || 1)
+    count = min(count, 10)  # Cap at 10
+
+    VMPool.warm_for_image(ref, count)
+    send_json(conn, 202, %{
+      status: "warming",
+      image: ref,
+      requested: count,
+      message: "VMs will boot in background. Check /pool/stats for warm VM count."
+    })
+  end
+
+  get "/images/:ref/warm-status" do
+    stats = VMPool.stats()
+    pool_stats = get_in(stats, [:by_image]) || %{}
+    warm_count = Map.get(pool_stats, ref, 0)
+
+    send_json(conn, 200, %{
+      image: ref,
+      warm_vms: warm_count,
+      pool_stats: stats
+    })
+  end
+
+  # ── Pool ─────────────────────────────────────────────────────
 
   get "/pool/stats" do
     stats = VMPool.stats()

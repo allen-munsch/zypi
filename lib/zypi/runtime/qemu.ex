@@ -11,8 +11,8 @@ defmodule Zypi.Runtime.QEMU do
   @behaviour Zypi.Runtime.Behaviour
   require Logger
 
-  @data_dir Application.compile_env(:zypi, :data_dir, "/var/lib/zypi")
-  @vm_dir Path.join(@data_dir, "vms")
+  defp data_dir, do: Application.get_env(:zypi, :data_dir, "/var/lib/zypi")
+  defp vm_dir, do: Path.join(data_dir(), "vms")
 
   @impl true
   def available? do
@@ -53,7 +53,7 @@ defmodule Zypi.Runtime.QEMU do
   def start(container) do
     Logger.info("QEMU: Starting VM for #{container.id}")
 
-    vm_path = Path.join(@vm_dir, container.id)
+    vm_path = Path.join(vm_dir(), container.id)
     File.mkdir_p!(vm_path)
 
     pid_file = Path.join(vm_path, "qemu.pid")
@@ -146,7 +146,7 @@ defmodule Zypi.Runtime.QEMU do
 
   @impl true
   def cleanup(container_id) do
-    vm_path = Path.join(@vm_dir, container_id)
+    vm_path = Path.join(vm_dir(), container_id)
     
     # Kill QEMU process
     System.cmd("pkill", ["-f", "qemu.*#{container_id}"], stderr_to_stdout: true)

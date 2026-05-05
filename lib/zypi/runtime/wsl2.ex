@@ -15,8 +15,8 @@ defmodule Zypi.Runtime.WSL2 do
   @behaviour Zypi.Runtime.Behaviour
   require Logger
 
-  @wsl_distro Application.compile_env(:zypi, :wsl_distro, "Ubuntu")
-  @data_dir "/var/lib/zypi"  # Path inside WSL
+  defp wsl_distro, do: Application.get_env(:zypi, :wsl_distro, "Ubuntu")
+  defp data_dir, do: Application.get_env(:zypi, :data_dir, "/var/lib/zypi")
 
   @impl true
   def available? do
@@ -59,15 +59,15 @@ defmodule Zypi.Runtime.WSL2 do
     wsl_rootfs = windows_to_wsl_path(container.rootfs)
 
     # Create VM directory in WSL
-    wsl_cmd(["mkdir", "-p", "#{@data_dir}/vms/#{container.id}"])
+    wsl_cmd(["mkdir", "-p", "#{data_dir()}/vms/#{container.id}"])
 
     # Copy rootfs to WSL if needed
     if not String.starts_with?(container.rootfs, "/") do
-      wsl_cmd(["cp", wsl_rootfs, "#{@data_dir}/vms/#{container.id}/rootfs.ext4"])
-      _wsl_rootfs = "#{@data_dir}/vms/#{container.id}/rootfs.ext4"
+      wsl_cmd(["cp", wsl_rootfs, "#{data_dir()}/vms/#{container.id}/rootfs.ext4"])
+      _wsl_rootfs = "#{data_dir()}/vms/#{container.id}/rootfs.ext4"
     end
 
-    socket_path = "#{@data_dir}/vms/#{container.id}/api.sock"
+    socket_path = "#{data_dir()}/vms/#{container.id}/api.sock"
 
     # Build Firecracker command to run in WSL
     mem_mb = get_in(container.resources, [:memory_mb]) || 256
@@ -79,7 +79,7 @@ defmodule Zypi.Runtime.WSL2 do
     fc_script = """
     #!/bin/bash
     set -e
-    cd #{@data_dir}/vms/#{container.id}
+    cd #{data_dir()}/vms/#{container.id}
 
     # Start Firecracker
     firecracker --api-sock #{socket_path} &
@@ -107,7 +107,7 @@ defmodule Zypi.Runtime.WSL2 do
     wait $FC_PID
     """
 
-    script_path = "#{@data_dir}/vms/#{container.id}/start.sh"
+    script_path = "#{data_dir()}/vms/#{container.id}/start.sh"
     wsl_cmd(["bash", "-c", "cat > #{script_path} << 'EOF'\n#{fc_script}\nEOF"])
     wsl_cmd(["chmod", "+x", script_path])
 
@@ -123,7 +123,7 @@ defmodule Zypi.Runtime.WSL2 do
           socket_path: socket_path,
           pid: nil,
           container_ip: container.ip,
-          wsl_distro: @wsl_distro
+          wsl_distro: wsl_distro()
         }}
       error -> error
     end
@@ -156,7 +156,7 @@ defmodule Zypi.Runtime.WSL2 do
 
   @impl true
   def cleanup(container_id) do
-    wsl_cmd(["rm", "-rf", "#{@data_dir}/vms/#{container_id}"])
+    wsl_cmd(["rm", "-rf", "#{data_dir()}/vms/#{container_id}"])
     :ok
   end
 
@@ -182,7 +182,7 @@ defmodule Zypi.Runtime.WSL2 do
   # Private functions
 
   defp wsl_cmd(args) do
-    System.cmd("wsl", ["-d", @wsl_distro, "--"] ++ args, stderr_to_stdout: true)
+    System.cmd("wsl", ["-d", wsl_distro(), "--"] ++ args, stderr_to_stdout: true)
   end
 
   defp windows_to_wsl_path(path) do

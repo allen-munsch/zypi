@@ -2,9 +2,10 @@ defmodule Zypi.Pool.ImageStore do
   use GenServer
   require Logger
 
-  @data_dir Application.compile_env(:zypi, :data_dir, "/var/lib/zypi")
-  @images_dir Path.join( @data_dir, "images")
-  @containers_dir Path.join( @data_dir, "containers")
+  defp data_dir, do: Application.get_env(:zypi, :data_dir) || default_data_dir()
+  defp default_data_dir, do: Path.join(System.tmp_dir!(), "zypi-#{System.get_env("USER", "nobody")}")
+  defp images_dir, do: Path.join(data_dir(), "images")
+  defp containers_dir, do: Path.join(data_dir(), "containers")
 
   defmodule ImageMeta do
     defstruct [:ref, :ext4_path, :size_bytes, :created_at, :container_config]
@@ -40,8 +41,8 @@ end
 
   @impl true
   def init(_opts) do
-    File.mkdir_p!( @images_dir)
-    File.mkdir_p!( @containers_dir)
+    File.mkdir_p!( images_dir())
+    File.mkdir_p!( containers_dir())
     images = load_existing_images()
     Logger.info("ImageStore initialized with #{map_size(images)} images")
     {:ok, %{images: images}}
@@ -99,7 +100,7 @@ end
       nil ->
         {:reply, {:error, :image_not_found}, state}
       meta ->
-        container_dir = Path.join( @containers_dir, container_id)
+        container_dir = Path.join(containers_dir(), container_id)
         File.mkdir_p!(container_dir)
         snapshot_path = Path.join(container_dir, "rootfs.ext4")
         case do_snapshot_copy(meta.ext4_path, snapshot_path) do
@@ -114,7 +115,7 @@ end
 
   @impl true
   def handle_call({:destroy_snapshot, container_id}, _from, state) do
-    container_dir = Path.join( @containers_dir, container_id)
+    container_dir = Path.join(containers_dir(), container_id)
     File.rm_rf(container_dir)
     {:reply, :ok, state}
   end
@@ -141,12 +142,12 @@ end
   end
 
   defp load_existing_images do
-    case File.ls( @images_dir) do
+    case File.ls( images_dir()) do
       {:ok, files} ->
         files
         |> Enum.filter(&String.ends_with?(&1, ".json"))
         |> Enum.reduce(%{}, fn file, acc ->
-          path = Path.join( @images_dir, file)
+          path = Path.join( images_dir(), file)
           case File.read(path) do
             {:ok, data} ->
               meta = Jason.decode!(data, keys: :atoms)
@@ -166,6 +167,6 @@ end
 
   defp meta_path(ref) do
     encoded = Base.url_encode64(ref, padding: false)
-    Path.join( @images_dir, "#{encoded}.json")
+    Path.join( images_dir(), "#{encoded}.json")
   end
 end
