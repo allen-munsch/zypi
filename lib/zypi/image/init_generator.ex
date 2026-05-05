@@ -178,12 +178,13 @@ defmodule Zypi.Image.InitGenerator do
 
     # Egress proxy — route all outbound HTTP/HTTPS through iron-proxy
     # iron-proxy enforces default-deny with domain allowlist and secret injection.
+    # Runs on the zypi0 bridge gateway (10.0.0.1).
     # Set to empty to disable (direct internet access).
-    export HTTP_PROXY=http://10.0.0.2:8080
-    export HTTPS_PROXY=http://10.0.0.2:8080
-    export http_proxy=http://10.0.0.2:8080
-    export https_proxy=http://10.0.0.2:8080
-    export NO_PROXY=localhost,127.0.0.1,10.0.0.0/8,.local
+    export http_proxy=http://10.0.0.1:8080
+    export https_proxy=http://10.0.0.1:8080
+    export HTTP_PROXY=http://10.0.0.1:8080
+    export HTTPS_PROXY=http://10.0.0.1:8080
+    export no_proxy=localhost,127.0.0.1,10.0.0.0/8,.local
 
     export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     export HOME=/root

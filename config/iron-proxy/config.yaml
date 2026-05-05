@@ -24,7 +24,7 @@ tls:
   mode: "sni-only"
 
 metrics:
-  listen: ":9090"
+  listen: ":9091"
 
 transforms:
   # Default-deny allowlist — only these domains can be reached
@@ -53,8 +53,6 @@ transforms:
         - "10.0.0.0/24"
 
   # Secret injection — sandboxes use proxy tokens, iron-proxy swaps real creds
-  # Uncomment and set IRON_OPENAI_API_KEY env var to enable
-  #
   # - name: secrets
   #   config:
   #     secrets:
@@ -66,9 +64,6 @@ transforms:
   #         match_body: false
   #         rules:
   #           - host: "api.openai.com"
-
-metrics:
-  listen: ":9091"
 
 log:
   level: "info"
