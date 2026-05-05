@@ -476,8 +476,24 @@ defmodule Zypi.Pool.VMPool do
     Enum.reduce(1..count, state, fn _, acc ->
       vm_id = generate_vm_id()
 
+      # CRITICAL: Firecracker port is opened inside the Task, which exits after
+      # boot_warm_vm returns. When the Task exits, Erlang closes all its ports
+      # → Firecracker killed → VM dies within 2-6s.
+      #
+      # Fix: transfer port to VMPool GenServer AND unlink from Task before exit.
+      # Port.connect changes the message recipient but keeps the old link.
+      # Process.unlink breaks the old link so Task exit doesn't kill the port.
       Task.start(fn ->
         result = boot_warm_vm(vm_id, image)
+        case result do
+          {:ok, vm_state, _ip, _rootfs} ->
+            port = vm_state[:pid]
+            if port && is_port(port) do
+              Process.unlink(port)
+              Port.connect(port, parent)
+            end
+          _ -> :ok
+        end
         send(parent, {:vm_booted, vm_id, result})
       end)
 
