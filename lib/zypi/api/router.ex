@@ -9,6 +9,7 @@ defmodule Zypi.API.Router do
   alias Zypi.Store.Images, as: StoreImages
   alias Zypi.Image.Importer, as: ImageImporter
   alias Zypi.Executor
+  alias Zypi.Session.Manager, as: SessionManager
   alias Zypi.Pool.VMPool
 
   defmodule Zypi.API.RequestTimer do
@@ -460,7 +461,7 @@ end
       metadata: conn.body_params["metadata"] || %{}
     ]
 
-    case Zypi.Session.Manager.create(agent_id, image, opts) do
+    case SessionManager.create(agent_id, image, opts) do
       {:ok, session} ->
         send_json(conn, 201, %{
           session_id: session.id,
@@ -492,7 +493,7 @@ end
       if stream? do
         stream_session_exec(conn, id, cmd, opts)
       else
-        case Zypi.Session.Manager.exec(id, cmd, opts) do
+        case SessionManager.exec(id, cmd, opts) do
           {:ok, result} ->
             send_json(conn, 200, %{
               exit_code: result.exit_code,
@@ -515,7 +516,7 @@ end
   end
 
   get "/sessions/:id" do
-    case Zypi.Session.Manager.get(id) do
+    case SessionManager.get(id) do
       {:ok, session} ->
         send_json(conn, 200, %{
           session_id: session.id,
@@ -533,19 +534,19 @@ end
   end
 
   get "/sessions" do
-    {:ok, sessions} = Zypi.Session.Manager.list()
+    {:ok, sessions} = SessionManager.list()
     send_json(conn, 200, %{sessions: sessions, count: length(sessions)})
   end
 
   delete "/sessions/:id" do
-    case Zypi.Session.Manager.close(id) do
+    case SessionManager.close(id) do
       :ok -> send_json(conn, 200, %{status: "closed"})
       {:error, :not_found} -> send_json(conn, 404, %{error: "session not found"})
     end
   end
 
   get "/sessions/stats" do
-    stats = Zypi.Session.Manager.stats()
+    stats = SessionManager.stats()
     send_json(conn, 200, stats)
   end
 
@@ -623,7 +624,7 @@ end
     end
 
     task = Task.async(fn ->
-      Zypi.Session.Manager.exec(session_id, cmd, opts)
+      SessionManager.exec(session_id, cmd, opts)
     end)
 
     timeout_ms = (Keyword.get(opts, :timeout, 30) + 5) * 1000
