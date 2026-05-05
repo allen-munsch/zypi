@@ -94,8 +94,9 @@ RUN curl -L https://github.com/firecracker-microvm/firecracker/releases/download
 #
 #
 # See: tools/build_vmlinux.sh
-COPY kernel/vmlinux /opt/zypi/kernel/vmlinux
-RUN if [ ! -f /opt/zypi/kernel/vmlinux ]; then \
+# vmlinux downloaded at build time (or use tools/build_vmlinux.sh)
+# COPY kernel/vmlinux /opt/zypi/kernel/vmlinux
+RUN mkdir -p /opt/zypi/kernel && if [ ! -f /opt/zypi/kernel/vmlinux ]; then \
       echo "WARNING: Local vmlinux not found — downloading fallback"; \
       curl -fsSL -o /opt/zypi/kernel/vmlinux "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin"; \
     fi && \
