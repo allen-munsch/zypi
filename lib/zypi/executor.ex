@@ -186,7 +186,7 @@ defmodule Zypi.Executor do
         env: Keyword.get(opts, :env, %{}),
         workdir: Keyword.get(opts, :workdir),
         stdin: Keyword.get(opts, :stdin),
-        timeout: Keyword.get(opts, :timeout, @default_timeout),
+        timeout: Keyword.get(opts, :timeout, @default_timeout) * 1000,
         ip: ip
       ]
       |> Enum.reject(fn {_, v} -> is_nil(v) end)
