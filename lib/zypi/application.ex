@@ -121,6 +121,10 @@ defmodule Zypi.Application do
       case Zypi.Image.InitGenerator.inject(base_rootfs, config) do
         :ok ->
           Logger.info("Base rootfs prepared successfully")
+          # Register the base image so exec/sessions can find it
+          size = File.stat!(base_rootfs).size
+          Zypi.Pool.ImageStore.put_image("ubuntu:24.04", base_rootfs, %{}, size)
+          Logger.info("Registered image ubuntu:24.04 (#{div(size, 1_048_576)}MB)")
         {:error, reason} ->
           Logger.error("Failed to prepare base rootfs: #{inspect(reason)}")
       end
