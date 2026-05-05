@@ -176,6 +176,15 @@ defmodule Zypi.Image.InitGenerator do
       echo "nameserver 8.8.8.8" >> /etc/resolv.conf
     fi
 
+    # Egress proxy — route all outbound HTTP/HTTPS through iron-proxy
+    # iron-proxy enforces default-deny with domain allowlist and secret injection.
+    # Set to empty to disable (direct internet access).
+    export HTTP_PROXY=http://10.0.0.2:8080
+    export HTTPS_PROXY=http://10.0.0.2:8080
+    export http_proxy=http://10.0.0.2:8080
+    export https_proxy=http://10.0.0.2:8080
+    export NO_PROXY=localhost,127.0.0.1,10.0.0.0/8,.local
+
     export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     export HOME=/root
     export TERM=linux

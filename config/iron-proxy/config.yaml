@@ -1,0 +1,62 @@
+# iron-proxy configuration for Zypi sandbox egress firewall
+#
+# Routes sandbox outbound traffic through a default-deny MITM proxy.
+# Sandboxes can only reach domains explicitly listed in the allowlist.
+# Proxy tokens are swapped for real secrets at the boundary.
+
+listen_addr: "0.0.0.0:8080"
+
+# Upstream DNS — proxy resolves hostnames for sandboxes
+dns:
+  listen_addr: "0.0.0.0:5353"
+  upstream: ["8.8.8.8:53", "1.1.1.1:53"]
+
+# Default-deny: block everything not explicitly allowed
+proxy:
+  default_allow: false
+
+  # Deny cloud metadata endpoints and internal networks
+  upstream_deny_cidrs:
+    - "169.254.169.254/32"   # AWS/cloud IMDS
+    - "10.0.0.0/8"           # Zypi internal bridge network
+    - "127.0.0.0/8"          # Loopback
+    - "::1/128"              # IPv6 loopback
+
+  # Allowlist — domains sandboxes can reach
+  allow:
+    # Package registries (pip, npm, apt, cargo)
+    - host: "pypi.org"
+    - host: "files.pythonhosted.org"
+    - host: "registry.npmjs.org"
+    - host: "crates.io"
+    - host: "static.crates.io"
+    - host: "github.com"
+    - host: "api.github.com"
+    - host: "objects.githubusercontent.com"
+
+    # AI/LLM APIs (using proxy tokens, NOT real keys)
+    - host: "api.openai.com"
+    - host: "api.anthropic.com"
+    - host: "api.mistral.ai"
+    - host: "generativelanguage.googleapis.com"
+
+    # General internet (restrict in production)
+    - host: "httpbin.org"
+    - host: "ifconfig.me"
+    - host: "ident.me"
+
+  # Secret injection — sandboxes use proxy tokens, iron-proxy swaps real creds
+  #
+  # Sandbox code sends: Authorization: Bearer proxy-token-openai
+  # iron-proxy rewrites to: Authorization: Bearer sk-real-key
+  #
+  # secrets:
+  #   - name: "OPENAI_API_KEY"
+  #     proxy_token: "proxy-token-openai"
+  #     real_value: "${OPENAI_API_KEY}"
+
+  # Per-request audit trail (structured JSON to stdout)
+  audit_log: true
+
+# No upstream control plane — standalone mode
+# enrollment_token: ""

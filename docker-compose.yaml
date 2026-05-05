@@ -1,4 +1,19 @@
 services:
+  iron-proxy:
+    image: ironsh/iron-proxy:v0.21.0
+    container_name: zypi-iron-proxy
+    command: ["-config", "/etc/iron-proxy/config.yaml"]
+    volumes:
+      - ./config/iron-proxy/config.yaml:/etc/iron-proxy/config.yaml:ro
+      - iron-proxy-certs:/certs
+    ports:
+      - "8080:8080"   # HTTP proxy
+      - "5353:5353/udp" # DNS
+    networks:
+      zypi_net:
+        ipv4_address: 10.0.0.2  # Fixed IP so VMs can reach it
+    restart: unless-stopped
+
   zypi-node:
     build:
       context: .
@@ -40,6 +55,13 @@ services:
     networks:
       - zypi_net
 
+volumes:
+  iron-proxy-certs:
+
 networks:
   zypi_net:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.0.0/24
+          gateway: 10.0.0.1
