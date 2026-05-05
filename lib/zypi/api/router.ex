@@ -415,6 +415,7 @@ end
       send_json(conn, 400, %{error: "cmd must be a list of strings"})
     else
       agent_id = conn.body_params["agent_id"]
+      stream? = conn.body_params["stream"] == true
 
       opts = [
         image: conn.body_params["image"],
@@ -424,19 +425,23 @@ end
         files: conn.body_params["files"]
       ] |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
-      case Executor.run(cmd, opts) do
-        {:ok, result} ->
-          response = %{
-            exit_code: result.exit_code,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            duration_ms: result.duration_ms,
-            container_id: result.container_id
-          }
-          response = if agent_id, do: Map.put(response, :agent_id, agent_id), else: response
-          send_json(conn, 200, response)
-        {:error, reason} ->
-          send_json(conn, 500, %{error: inspect(reason)})
+      if stream? do
+        stream_exec(conn, cmd, opts, agent_id)
+      else
+        case Executor.run(cmd, opts) do
+          {:ok, result} ->
+            response = %{
+              exit_code: result.exit_code,
+              stdout: result.stdout,
+              stderr: result.stderr,
+              duration_ms: result.duration_ms,
+              container_id: result.container_id
+            }
+            response = if agent_id, do: Map.put(response, :agent_id, agent_id), else: response
+            send_json(conn, 200, response)
+          {:error, reason} ->
+            send_json(conn, 500, %{error: inspect(reason)})
+        end
       end
     end
   end
@@ -475,29 +480,34 @@ end
     if is_nil(cmd) or not is_list(cmd) do
       send_json(conn, 400, %{error: "cmd must be a list of strings"})
     else
+      stream? = conn.body_params["stream"] == true
       opts = [
         env: conn.body_params["env"],
         workdir: conn.body_params["workdir"],
         timeout: conn.body_params["timeout"] || 30
       ] |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
-      case Zypi.Session.Manager.exec(id, cmd, opts) do
-        {:ok, result} ->
-          send_json(conn, 200, %{
-            exit_code: result.exit_code,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            timed_out: result.timed_out || false,
-            session_id: result.session_id,
-            container_id: result.container_id
-          })
-        {:error, reason} ->
-          status = case reason do
-            :session_not_found -> 404
-            {:session_closed, _} -> 410
-            _ -> 500
-          end
-          send_json(conn, status, %{error: inspect(reason)})
+      if stream? do
+        stream_session_exec(conn, id, cmd, opts)
+      else
+        case Zypi.Session.Manager.exec(id, cmd, opts) do
+          {:ok, result} ->
+            send_json(conn, 200, %{
+              exit_code: result.exit_code,
+              stdout: result.stdout,
+              stderr: result.stderr,
+              timed_out: result.timed_out || false,
+              session_id: result.session_id,
+              container_id: result.container_id
+            })
+          {:error, reason} ->
+            status = case reason do
+              :session_not_found -> 404
+              {:session_closed, _} -> 410
+              _ -> 500
+            end
+            send_json(conn, status, %{error: inspect(reason)})
+        end
       end
     end
   end
@@ -573,6 +583,123 @@ end
 
   match _ do
     send_json(conn, 404, %{error: "not_found"})
+  end
+
+  # ── SSE Streaming Helpers ───────────────────────────────────
+
+  defp stream_exec(conn, cmd, opts, agent_id) do
+    conn = conn
+      |> put_resp_content_type("text/event-stream")
+      |> put_resp_header("cache-control", "no-cache")
+      |> put_resp_header("connection", "keep-alive")
+      |> send_chunked(200)
+
+    parent = self()
+    caller = fn event, data ->
+      send(parent, {:sse_chunk, event, data})
+    end
+
+    task = Task.async(fn ->
+      Executor.run(cmd, opts)
+    end)
+
+    timeout_ms = (Keyword.get(opts, :timeout, 60) + 5) * 1000
+
+    sse_loop(conn, task, agent_id, caller, timeout_ms)
+  end
+
+  defp stream_session_exec(conn, session_id, cmd, opts) do
+    conn = conn
+      |> put_resp_content_type("text/event-stream")
+      |> put_resp_header("cache-control", "no-cache")
+      |> put_resp_header("connection", "keep-alive")
+      |> send_chunked(200)
+
+    parent = self()
+    caller = fn event, data ->
+      send(parent, {:sse_chunk, event, data})
+    end
+
+    task = Task.async(fn ->
+      Zypi.Session.Manager.exec(session_id, cmd, opts)
+    end)
+
+    timeout_ms = (Keyword.get(opts, :timeout, 30) + 5) * 1000
+
+    sse_loop(conn, task, session_id, caller, timeout_ms)
+  end
+
+  defp sse_loop(conn, task, context_id, caller, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    last_keepalive = System.monotonic_time(:millisecond)
+
+    do_sse_loop(conn, task, context_id, caller, deadline, last_keepalive)
+  end
+
+  defp do_sse_loop(conn, task, context_id, caller, deadline, last_keepalive) do
+    now = System.monotonic_time(:millisecond)
+
+    cond do
+      now >= deadline ->
+        Task.shutdown(task, :brutal_kill)
+        event_chunk(conn, "error", Jason.encode!(%{error: "timeout", context_id: context_id}))
+
+      # Send keepalive every 5 seconds
+      now - last_keepalive >= 5_000 ->
+        case chunk(conn, ": keepalive\n\n") do
+          {:ok, conn} ->
+            do_sse_loop(conn, task, context_id, caller, deadline, now)
+          {:error, _} ->
+            Task.shutdown(task, :brutal_kill)
+            conn
+        end
+
+      true ->
+        receive do
+          {:sse_chunk, event, data} ->
+            payload = if is_map(data) or is_list(data), do: Jason.encode!(data), else: to_string(data)
+
+            case event_chunk(conn, event, payload) do
+              {:ok, conn} ->
+                do_sse_loop(conn, task, context_id, caller, deadline, now)
+              {:error, _} ->
+                Task.shutdown(task, :brutal_kill)
+                conn
+            end
+        after
+          100 ->
+            # Check if task completed
+            case Task.yield(task, 0) do
+              nil ->
+                do_sse_loop(conn, task, context_id, caller, deadline, now)
+
+              {:ok, {:ok, result}} ->
+                response = %{
+                  exit_code: result[:exit_code] || result.exit_code,
+                  stdout: result[:stdout] || "",
+                  stderr: result[:stderr] || "",
+                  duration_ms: result[:duration_ms],
+                  container_id: result[:container_id] || result[:session_id],
+                  context_id: context_id
+                }
+                {:ok, conn} = event_chunk(conn, "result", Jason.encode!(response))
+                {:ok, conn} = event_chunk(conn, "done", "")
+                conn
+
+              {:ok, {:error, reason}} ->
+                {:ok, conn} = event_chunk(conn, "error", Jason.encode!(%{error: inspect(reason), context_id: context_id}))
+                conn
+
+              {:exit, _reason} ->
+                {:ok, conn} = event_chunk(conn, "error", Jason.encode!(%{error: "execution crashed", context_id: context_id}))
+                conn
+            end
+        end
+    end
+  end
+
+  defp event_chunk(conn, event, data) do
+    chunk(conn, "event: #{event}\ndata: #{data}\n\n")
   end
 
   defp stream_output(conn, container_id) do

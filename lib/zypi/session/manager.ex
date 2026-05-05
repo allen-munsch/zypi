@@ -89,6 +89,7 @@ defmodule Zypi.Session.Manager do
     idle_timeout = Keyword.get(opts, :idle_timeout_ms, @default_idle_timeout_ms)
     state = %State{idle_timeout_ms: idle_timeout}
     Process.send_after(self(), :cleanup_idle, @cleanup_interval_ms)
+    Process.send_after(self(), :health_check_sessions, 30_000)
     Logger.info("Session.Manager started (idle_timeout=#{div(idle_timeout, 1000)}s)")
     {:ok, state}
   end
@@ -262,6 +263,36 @@ defmodule Zypi.Session.Manager do
 
     state = %{state | sessions: Map.new(active)}
     Process.send_after(self(), :cleanup_idle, @cleanup_interval_ms)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:health_check_sessions, state) do
+    running = state.sessions
+      |> Enum.filter(fn {_id, s} -> s.status == :running end)
+
+    {healthy, unhealthy} =
+      running
+      |> Enum.split_with(fn {_id, s} ->
+        case Agent.health(s.container_id) do
+          {:ok, %{"status" => "healthy"}} -> true
+          _ -> false
+        end
+      end)
+
+    if length(unhealthy) > 0 do
+      Logger.warning("Session.Manager: #{length(unhealthy)} unhealthy sessions detected")
+
+      sessions = Enum.reduce(unhealthy, state.sessions, fn {id, session}, acc ->
+        Logger.info("Session #{id} marked unhealthy (container=#{session.container_id})")
+        do_close(session)
+        Map.delete(acc, id)
+      end)
+
+      state = %{state | sessions: sessions}
+    end
+
+    Process.send_after(self(), :health_check_sessions, 30_000)
     {:noreply, state}
   end
 
