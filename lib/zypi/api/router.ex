@@ -422,7 +422,9 @@ end
         env: conn.body_params["env"],
         workdir: conn.body_params["workdir"],
         timeout: conn.body_params["timeout"],
-        files: conn.body_params["files"]
+        files: conn.body_params["files"],
+        memory_mb: conn.body_params["memory_mb"],
+        vcpus: conn.body_params["vcpus"]
       ] |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
       if stream? do

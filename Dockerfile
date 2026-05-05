@@ -129,7 +129,7 @@ RUN mkdir -p /opt/zypi/rootfs && \
     chroot squashfs-root /bin/bash -c ' \
       set -e && \
       apt-get update && \
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server bridge-utils netcat-openbsd && \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server bridge-utils netcat-openbsd chromium-browser && \
       ssh-keygen -A && \
       cat > /etc/inittab <<EOF \
 ttyS0::respawn:/sbin/agetty -L 115200 ttyS0 linux \
