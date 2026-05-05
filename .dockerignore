@@ -1,0 +1,17 @@
+# Zypi Docker build ignore
+# 
+# Kernel: exclude by default (too large for git, downloaded at build time).
+# To use a custom kernel, remove "kernel/" from this file and place your
+# vmlinux at kernel/vmlinux, then rebuild:
+#   cp /path/to/custom/vmlinux kernel/vmlinux
+#   docker compose build
+
+_build/
+deps/
+.git/
+context/
+accelerated-container-image/
+.zypi/
+kernel/
+erl_crash.dump
+__pycache__/
