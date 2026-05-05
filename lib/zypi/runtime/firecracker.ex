@@ -6,9 +6,9 @@ defmodule Zypi.Runtime.Firecracker do
   @behaviour Zypi.Runtime.Behaviour
   require Logger
 
-  @data_dir Application.compile_env(:zypi, :data_dir, "/var/lib/zypi")
-  @vm_dir Path.join(@data_dir, "vms")
-  @kernel_path Application.compile_env(:zypi, :kernel_path, "/opt/zypi/kernel/vmlinux")
+  defp data_dir, do: Application.get_env(:zypi, :data_dir, "/var/lib/zypi")
+  defp vm_dir, do: Path.join(data_dir(), "vms")
+  defp kernel_path, do: Application.get_env(:zypi, :kernel_path, "/opt/zypi/kernel/vmlinux")
 
   # Check if Firecracker is available
   @impl true
@@ -43,7 +43,7 @@ defmodule Zypi.Runtime.Firecracker do
   def start(container) do
     Logger.info("Firecracker: Starting VM for #{container.id}")
 
-    vm_path = Path.join(@vm_dir, container.id)
+    vm_path = Path.join(vm_dir(), container.id)
     File.mkdir_p!(vm_path)
     socket_path = Path.join(vm_path, "api.sock")
     File.rm(socket_path)
@@ -52,16 +52,16 @@ defmodule Zypi.Runtime.Firecracker do
     Logger.debug("Firecracker: VM path: #{vm_path}")
     Logger.debug("Firecracker: Socket path: #{socket_path}")
     Logger.debug("Firecracker: Rootfs: #{container.rootfs}")
-    Logger.debug("Firecracker: Kernel: #{ @kernel_path}")
+    Logger.debug("Firecracker: Kernel: #{kernel_path()}")
 
     # Verify required files exist
     cond do
       not File.exists?(container.rootfs) ->
         Logger.error("Firecracker: Rootfs not found: #{container.rootfs}")
         {:error, {:rootfs_not_found, container.rootfs}}
-      not File.exists?(@kernel_path) ->
-        Logger.error("Firecracker: Kernel not found: #{ @kernel_path}")
-        {:error, {:kernel_not_found, @kernel_path}}
+      not File.exists?(kernel_path()) ->
+        Logger.error("Firecracker: Kernel not found: #{kernel_path()}")
+        {:error, {:kernel_not_found, kernel_path()}}
       true ->
         # Continue with VM startup
         do_start_vm(container, vm_path, socket_path)
@@ -129,7 +129,7 @@ defmodule Zypi.Runtime.Firecracker do
 
   @impl true
   def cleanup(container_id) do
-    vm_path = Path.join(@vm_dir, container_id)
+    vm_path = Path.join(vm_dir(), container_id)
     socket_path = Path.join(vm_path, "api.sock")
     System.cmd("pkill", ["-f", "firecracker.*#{socket_path}"], stderr_to_stdout: true)
     File.rm_rf(vm_path)
@@ -272,14 +272,14 @@ defmodule Zypi.Runtime.Firecracker do
       ]
       |> Enum.join(" ")
 
-    Logger.debug("Firecracker: Configuring VM - kernel=#{ @kernel_path}, rootfs=#{rootfs_path}")
+    Logger.debug("Firecracker: Configuring VM - kernel=#{kernel_path()}, rootfs=#{rootfs_path}")
     Logger.debug("Firecracker: Boot args: #{boot_args}")
     Logger.debug("Firecracker: Resources: vcpus=#{vcpus}, mem=#{mem_mb}MB")
     Logger.debug("Firecracker: Network: tap=#{tap}, ip=#{ip_str}")
 
     with :ok <-
            api_request(socket_path, :put, "/boot-source", %{
-             kernel_image_path: @kernel_path,
+             kernel_image_path: kernel_path(),
              boot_args: boot_args
            })
            |> tap_result("boot-source"),

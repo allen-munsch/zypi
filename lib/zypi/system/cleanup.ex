@@ -7,7 +7,7 @@ defmodule Zypi.System.Cleanup do
   require Logger
 
   @cleanup_interval_ms 60_000
-  @data_dir Application.compile_env(:zypi, :data_dir, "/var/lib/zypi")
+  defp data_dir, do: Application.get_env(:zypi, :data_dir, "/var/lib/zypi")
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -172,8 +172,8 @@ defmodule Zypi.System.Cleanup do
   end
 
   defp cleanup_stale_dirs(stats, active_ids) do
-    vms_dir = Path.join(@data_dir, "vms")
-    containers_dir = Path.join(@data_dir, "containers")
+    vms_dir = Path.join(data_dir(), "vms")
+    containers_dir = Path.join(data_dir(), "containers")
 
     cleaned = cleanup_dir(vms_dir, active_ids) +
               cleanup_dir(containers_dir, active_ids)

@@ -406,12 +406,17 @@ end
     {:error, :body_too_large}
   end
 
+  # ── Agent Fabric: One-Shot Sandbox Execution ──────────────────
+
   post "/exec" do
     cmd = conn.body_params["cmd"]
 
     if is_nil(cmd) or not is_list(cmd) do
       send_json(conn, 400, %{error: "cmd must be a list of strings"})
     else
+      agent_id = conn.body_params["agent_id"]
+      stream? = conn.body_params["stream"] == true
+
       opts = [
         image: conn.body_params["image"],
         env: conn.body_params["env"],
@@ -420,20 +425,156 @@ end
         files: conn.body_params["files"]
       ] |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
-      case Executor.run(cmd, opts) do
-        {:ok, result} ->
-          send_json(conn, 200, %{
-            exit_code: result.exit_code,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            duration_ms: result.duration_ms,
-            container_id: result.container_id
-          })
-        {:error, reason} ->
-          send_json(conn, 500, %{error: inspect(reason)})
+      if stream? do
+        stream_exec(conn, cmd, opts, agent_id)
+      else
+        case Executor.run(cmd, opts) do
+          {:ok, result} ->
+            response = %{
+              exit_code: result.exit_code,
+              stdout: result.stdout,
+              stderr: result.stderr,
+              duration_ms: result.duration_ms,
+              container_id: result.container_id
+            }
+            response = if agent_id, do: Map.put(response, :agent_id, agent_id), else: response
+            send_json(conn, 200, response)
+          {:error, reason} ->
+            send_json(conn, 500, %{error: inspect(reason)})
+        end
       end
     end
   end
+
+  # ── Agent Fabric: Long-Lived Sessions ────────────────────────
+
+  post "/sessions" do
+    agent_id = conn.body_params["agent_id"]
+    image = conn.body_params["image"] || "ubuntu:24.04"
+
+    opts = [
+      vcpus: conn.body_params["vcpus"] || 1,
+      memory_mb: conn.body_params["memory_mb"] || 256,
+      metadata: conn.body_params["metadata"] || %{}
+    ]
+
+    case Zypi.Session.Manager.create(agent_id, image, opts) do
+      {:ok, session} ->
+        send_json(conn, 201, %{
+          session_id: session.id,
+          container_id: session.container_id,
+          ip: format_ip(session.ip),
+          image: session.image,
+          agent_id: session.agent_id,
+          status: "running",
+          created_at: DateTime.to_iso8601(session.created_at)
+        })
+      {:error, reason} ->
+        send_json(conn, 500, %{error: inspect(reason)})
+    end
+  end
+
+  post "/sessions/:id/exec" do
+    cmd = conn.body_params["cmd"]
+
+    if is_nil(cmd) or not is_list(cmd) do
+      send_json(conn, 400, %{error: "cmd must be a list of strings"})
+    else
+      stream? = conn.body_params["stream"] == true
+      opts = [
+        env: conn.body_params["env"],
+        workdir: conn.body_params["workdir"],
+        timeout: conn.body_params["timeout"] || 30
+      ] |> Enum.reject(fn {_, v} -> is_nil(v) end)
+
+      if stream? do
+        stream_session_exec(conn, id, cmd, opts)
+      else
+        case Zypi.Session.Manager.exec(id, cmd, opts) do
+          {:ok, result} ->
+            send_json(conn, 200, %{
+              exit_code: result.exit_code,
+              stdout: result.stdout,
+              stderr: result.stderr,
+              timed_out: result.timed_out || false,
+              session_id: result.session_id,
+              container_id: result.container_id
+            })
+          {:error, reason} ->
+            status = case reason do
+              :session_not_found -> 404
+              {:session_closed, _} -> 410
+              _ -> 500
+            end
+            send_json(conn, status, %{error: inspect(reason)})
+        end
+      end
+    end
+  end
+
+  get "/sessions/:id" do
+    case Zypi.Session.Manager.get(id) do
+      {:ok, session} ->
+        send_json(conn, 200, %{
+          session_id: session.id,
+          container_id: session.container_id,
+          ip: format_ip(session.ip),
+          image: session.image,
+          agent_id: session.agent_id,
+          status: session.status,
+          created_at: DateTime.to_iso8601(session.created_at),
+          last_used_at: session.last_used_at && DateTime.to_iso8601(session.last_used_at)
+        })
+      {:error, :not_found} ->
+        send_json(conn, 404, %{error: "session not found"})
+    end
+  end
+
+  get "/sessions" do
+    {:ok, sessions} = Zypi.Session.Manager.list()
+    send_json(conn, 200, %{sessions: sessions, count: length(sessions)})
+  end
+
+  delete "/sessions/:id" do
+    case Zypi.Session.Manager.close(id) do
+      :ok -> send_json(conn, 200, %{status: "closed"})
+      {:error, :not_found} -> send_json(conn, 404, %{error: "session not found"})
+    end
+  end
+
+  get "/sessions/stats" do
+    stats = Zypi.Session.Manager.stats()
+    send_json(conn, 200, stats)
+  end
+
+  # ── Image Pre-Warming (Agent Fabric optimization) ────────────
+
+  post "/images/:ref/warm" do
+    count = (conn.body_params["count"] || 1)
+    count = min(count, 10)  # Cap at 10
+
+    VMPool.warm_for_image(ref, count)
+    send_json(conn, 202, %{
+      status: "warming",
+      image: ref,
+      requested: count,
+      message: "VMs will boot in background. Check /pool/stats for warm VM count."
+    })
+  end
+
+  get "/images/:ref/warm-status" do
+    stats = VMPool.stats()
+    pool_stats = get_in(stats, [:by_image]) || %{}
+    warm_count = Map.get(pool_stats, ref, 0)
+
+    send_json(conn, 200, %{
+      image: ref,
+      warm_vms: warm_count,
+      pool_stats: stats
+    })
+  end
+
+  # ── Pool ─────────────────────────────────────────────────────
 
   get "/pool/stats" do
     stats = VMPool.stats()
@@ -442,6 +583,123 @@ end
 
   match _ do
     send_json(conn, 404, %{error: "not_found"})
+  end
+
+  # ── SSE Streaming Helpers ───────────────────────────────────
+
+  defp stream_exec(conn, cmd, opts, agent_id) do
+    conn = conn
+      |> put_resp_content_type("text/event-stream")
+      |> put_resp_header("cache-control", "no-cache")
+      |> put_resp_header("connection", "keep-alive")
+      |> send_chunked(200)
+
+    parent = self()
+    caller = fn event, data ->
+      send(parent, {:sse_chunk, event, data})
+    end
+
+    task = Task.async(fn ->
+      Executor.run(cmd, opts)
+    end)
+
+    timeout_ms = (Keyword.get(opts, :timeout, 60) + 5) * 1000
+
+    sse_loop(conn, task, agent_id, caller, timeout_ms)
+  end
+
+  defp stream_session_exec(conn, session_id, cmd, opts) do
+    conn = conn
+      |> put_resp_content_type("text/event-stream")
+      |> put_resp_header("cache-control", "no-cache")
+      |> put_resp_header("connection", "keep-alive")
+      |> send_chunked(200)
+
+    parent = self()
+    caller = fn event, data ->
+      send(parent, {:sse_chunk, event, data})
+    end
+
+    task = Task.async(fn ->
+      Zypi.Session.Manager.exec(session_id, cmd, opts)
+    end)
+
+    timeout_ms = (Keyword.get(opts, :timeout, 30) + 5) * 1000
+
+    sse_loop(conn, task, session_id, caller, timeout_ms)
+  end
+
+  defp sse_loop(conn, task, context_id, caller, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    last_keepalive = System.monotonic_time(:millisecond)
+
+    do_sse_loop(conn, task, context_id, caller, deadline, last_keepalive)
+  end
+
+  defp do_sse_loop(conn, task, context_id, caller, deadline, last_keepalive) do
+    now = System.monotonic_time(:millisecond)
+
+    cond do
+      now >= deadline ->
+        Task.shutdown(task, :brutal_kill)
+        event_chunk(conn, "error", Jason.encode!(%{error: "timeout", context_id: context_id}))
+
+      # Send keepalive every 5 seconds
+      now - last_keepalive >= 5_000 ->
+        case chunk(conn, ": keepalive\n\n") do
+          {:ok, conn} ->
+            do_sse_loop(conn, task, context_id, caller, deadline, now)
+          {:error, _} ->
+            Task.shutdown(task, :brutal_kill)
+            conn
+        end
+
+      true ->
+        receive do
+          {:sse_chunk, event, data} ->
+            payload = if is_map(data) or is_list(data), do: Jason.encode!(data), else: to_string(data)
+
+            case event_chunk(conn, event, payload) do
+              {:ok, conn} ->
+                do_sse_loop(conn, task, context_id, caller, deadline, now)
+              {:error, _} ->
+                Task.shutdown(task, :brutal_kill)
+                conn
+            end
+        after
+          100 ->
+            # Check if task completed
+            case Task.yield(task, 0) do
+              nil ->
+                do_sse_loop(conn, task, context_id, caller, deadline, now)
+
+              {:ok, {:ok, result}} ->
+                response = %{
+                  exit_code: result[:exit_code] || result.exit_code,
+                  stdout: result[:stdout] || "",
+                  stderr: result[:stderr] || "",
+                  duration_ms: result[:duration_ms],
+                  container_id: result[:container_id] || result[:session_id],
+                  context_id: context_id
+                }
+                {:ok, conn} = event_chunk(conn, "result", Jason.encode!(response))
+                {:ok, conn} = event_chunk(conn, "done", "")
+                conn
+
+              {:ok, {:error, reason}} ->
+                {:ok, conn} = event_chunk(conn, "error", Jason.encode!(%{error: inspect(reason), context_id: context_id}))
+                conn
+
+              {:exit, _reason} ->
+                {:ok, conn} = event_chunk(conn, "error", Jason.encode!(%{error: "execution crashed", context_id: context_id}))
+                conn
+            end
+        end
+    end
+  end
+
+  defp event_chunk(conn, event, data) do
+    chunk(conn, "event: #{event}\ndata: #{data}\n\n")
   end
 
   defp stream_output(conn, container_id) do

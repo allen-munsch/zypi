@@ -14,8 +14,8 @@ defmodule Zypi.Runtime.HyperV do
   @behaviour Zypi.Runtime.Behaviour
   require Logger
 
-  @data_dir Application.compile_env(:zypi, :data_dir, "C:\\ProgramData\\Zypi")
-  @vm_dir Path.join(@data_dir, "vms")
+  defp data_dir, do: Application.get_env(:zypi, :data_dir, "C:\\ProgramData\\Zypi")
+  defp vm_dir, do: Path.join(data_dir(), "vms")
 
   @impl true
   def available? do
@@ -44,7 +44,7 @@ defmodule Zypi.Runtime.HyperV do
   def start(container) do
     Logger.info("HyperV: Starting VM for #{container.id}")
 
-    vm_path = Path.join(@vm_dir, container.id)
+    vm_path = Path.join(vm_dir(), container.id)
     File.mkdir_p!(vm_path)
 
     mem_mb = get_in(container.resources, [:memory_mb]) || 256
@@ -142,7 +142,7 @@ defmodule Zypi.Runtime.HyperV do
 
   @impl true
   def cleanup(container_id) do
-    vm_path = Path.join(@vm_dir, container_id)
+    vm_path = Path.join(vm_dir(), container_id)
     
     # Remove VM if exists
     powershell("""

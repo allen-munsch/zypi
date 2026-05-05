@@ -17,7 +17,7 @@ defmodule Zypi.Pool.VMPool do
   @default_max_total 50
   @warm_check_interval 5_000
   @health_check_interval 10_000
-  @data_dir Application.compile_env(:zypi, :data_dir, "/var/lib/zypi")
+  defp data_dir, do: Application.get_env(:zypi, :data_dir, "/var/lib/zypi")
 
   defmodule VMSlot do
     defstruct [
@@ -497,7 +497,7 @@ defmodule Zypi.Pool.VMPool do
   """
   defp create_vm_rootfs(vm_id) do
     base_rootfs = base_rootfs_path()
-    vm_dir = Path.join(@data_dir, "vms/#{vm_id}")
+    vm_dir = Path.join(data_dir(), "vms/#{vm_id}")
     File.mkdir_p!(vm_dir)
     vm_rootfs = Path.join(vm_dir, "rootfs.ext4")
 
@@ -516,7 +516,7 @@ defmodule Zypi.Pool.VMPool do
   end
 
   defp cleanup_vm_rootfs(vm_id) do
-    vm_dir = Path.join(@data_dir, "vms/#{vm_id}")
+    vm_dir = Path.join(data_dir(), "vms/#{vm_id}")
     File.rm_rf(vm_dir)
   end
 
