@@ -155,7 +155,7 @@ defmodule Zypi.Session.Manager do
             env: Keyword.get(opts, :env, %{}),
             workdir: Keyword.get(opts, :workdir),
             stdin: Keyword.get(opts, :stdin),
-            timeout: Keyword.get(opts, :timeout, 60),
+            timeout: Keyword.get(opts, :timeout, 60) * 1000,
             ip: session.ip
           ]
           |> Enum.reject(fn {_, v} -> is_nil(v) end)
