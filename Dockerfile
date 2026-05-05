@@ -94,9 +94,17 @@ RUN curl -L https://github.com/firecracker-microvm/firecracker/releases/download
 #
 #
 # See: tools/build_vmlinux.sh
+# --- Kernel ---
+# Build a custom kernel:          tools/build_vmlinux.sh
+# Use custom kernel in build:      cp vmlinux kernel/ && docker compose build
+# Without a local kernel, the quickstart kernel is auto-downloaded.
+RUN mkdir -p /opt/zypi/kernel
 COPY kernel/vmlinux /opt/zypi/kernel/vmlinux
-RUN if [ ! -f /opt/zypi/kernel/vmlinux ]; then \
-      echo "WARNING: Local vmlinux not found — downloading fallback"; \
+RUN if [ -s /opt/zypi/kernel/vmlinux ]; then \
+      echo "Using custom kernel"; \
+      strings /opt/zypi/kernel/vmlinux | grep "Linux version" || true; \
+    else \
+      echo "Downloading Firecracker quickstart kernel"; \
       curl -fsSL -o /opt/zypi/kernel/vmlinux "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin"; \
     fi && \
     chmod +x /opt/zypi/kernel/vmlinux

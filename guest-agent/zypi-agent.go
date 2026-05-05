@@ -1,4 +1,15 @@
-// zypi-agent - Guest agent running inside Firecracker VMs
+// zypi-agent - Guest agent running inside Firecracker VMs.
+//
+// Listens on vsock (port 52, auth required) or TCP (:9999, dev mode).
+// Handles: exec, file.read, file.write, health, shutdown.
+//
+// v2 changes (perf fix):
+//   - Short initial read deadline (5s) prevents goroutine leak from raw TCP pings
+//   - Max concurrent connections (100) prevents file descriptor exhaustion
+//   - Idle connection timeout (60s) cleans up stale connections
+//   - Graceful shutdown: tracks in-flight requests, waits for completion
+//   - Fixed isSafeCommand: exact prefix match instead of substring
+
 package main
 
 import (
@@ -14,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,11 +33,13 @@ import (
 )
 
 const (
-	VsockPort    = 52
-	MaxFileSize  = 100 * 1024 * 1024 // 100MB
-	ReadTimeout  = 30 * time.Second
-	WriteTimeout = 30 * time.Second
-	AuthToken    = "" // Set via environment variable ZYPI_TOKEN
+	VsockPort          = 52
+	MaxFileSize        = 100 * 1024 * 1024 // 100MB
+	InitialReadTimeout = 5 * time.Second   // Short timeout to prevent goroutine leak from raw TCP pings
+	MaxReadTimeout     = 30 * time.Second  // Max timeout once we've received valid data
+	WriteTimeout       = 30 * time.Second
+	IdleTimeout        = 60 * time.Second  // Close connection if no data received
+	MaxConns           = 100               // Max concurrent connections
 )
 
 type Request struct {
@@ -86,10 +100,12 @@ type HealthResult struct {
 }
 
 type Agent struct {
-	startTime time.Time
-	mu        sync.Mutex
-	processes map[string]*exec.Cmd
-	token     string
+	startTime  time.Time
+	mu         sync.Mutex
+	processes  map[string]*exec.Cmd
+	token      string
+	connCount  int32 // atomic counter for connection limiting
+	inFlight   int32 // atomic counter for graceful shutdown
 }
 
 func NewAgent() *Agent {
@@ -97,7 +113,7 @@ func NewAgent() *Agent {
 	if token == "" {
 		token = os.Getenv("ZYPI_AGENT_TOKEN")
 	}
-	
+
 	return &Agent{
 		startTime: time.Now(),
 		processes: make(map[string]*exec.Cmd),
@@ -108,11 +124,10 @@ func NewAgent() *Agent {
 func main() {
 	agent := NewAgent()
 
-	// Try vsock first, fallback to TCP for development
 	var listener net.Listener
 	var err error
-	
-	// Only use vsock if token is set (security requirement)
+
+	// Try vsock first, fallback to TCP for development
 	if agent.token != "" {
 		listener, err = vsock.Listen(uint32(VsockPort), &vsock.Config{})
 		if err != nil {
@@ -121,7 +136,7 @@ func main() {
 			fmt.Printf("zypi-agent listening on vsock port %d (token auth enabled)\n", VsockPort)
 		}
 	}
-	
+
 	// Fallback to TCP if vsock failed or token not set
 	if listener == nil {
 		listener, err = net.Listen("tcp", "0.0.0.0:9999")
@@ -130,38 +145,56 @@ func main() {
 			os.Exit(1)
 		}
 		if agent.token == "" {
-			fmt.Println("WARNING: zypi-agent listening on TCP :9999 without authentication")
+			fmt.Println("zypi-agent listening on TCP :9999 (no auth)")
 		} else {
 			fmt.Println("zypi-agent listening on TCP :9999 (token auth enabled)")
 		}
 	}
 
 	defer listener.Close()
-	
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			// Check if listener was closed (graceful shutdown)
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				fmt.Println("Listener closed, shutting down")
+				return
+			}
 			fmt.Fprintf(os.Stderr, "Accept error: %v\n", err)
 			continue
 		}
-		go agent.handleConnection(conn)
+
+		// Connection limit — don't spawn unbounded goroutines
+		current := atomic.AddInt32(&agent.connCount, 1)
+		if current > MaxConns {
+			atomic.AddInt32(&agent.connCount, -1)
+			fmt.Fprintf(os.Stderr, "Connection limit reached (%d), rejecting %s\n", MaxConns, conn.RemoteAddr())
+			conn.Close()
+			continue
+		}
+
+		go func() {
+			agent.handleConnection(conn)
+			atomic.AddInt32(&agent.connCount, -1)
+		}()
 	}
 }
 
 func (a *Agent) handleConnection(conn net.Conn) {
 	defer conn.Close()
-	
-	// Set timeouts
-	conn.SetReadDeadline(time.Now().Add(ReadTimeout))
+
+	// Short initial read timeout: prevents goroutine leak from raw TCP pings.
+	// Previously 30s — each raw TCP open/close (health ping) spawned a goroutine
+	// that blocked 30s on ReadBytes, piling up until the agent stopped accepting.
+	conn.SetReadDeadline(time.Now().Add(InitialReadTimeout))
 	conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
 
 	reader := bufio.NewReader(conn)
 	encoder := json.NewEncoder(conn)
+	hasReceivedData := false
 
 	for {
-		// Reset timeout for each request
-		conn.SetReadDeadline(time.Now().Add(ReadTimeout))
-		
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
 			if err != io.EOF {
@@ -169,6 +202,13 @@ func (a *Agent) handleConnection(conn net.Conn) {
 			}
 			return
 		}
+
+		// Once we've received data, extend the timeout for subsequent reads
+		if !hasReceivedData {
+			hasReceivedData = true
+		}
+		// Reset deadline after every successful read
+		conn.SetReadDeadline(time.Now().Add(IdleTimeout))
 
 		var req Request
 		if err := json.Unmarshal(line, &req); err != nil {
@@ -187,7 +227,11 @@ func (a *Agent) handleConnection(conn net.Conn) {
 			continue
 		}
 
+		// Track in-flight requests for graceful shutdown
+		atomic.AddInt32(&a.inFlight, 1)
 		resp := a.handleRequest(&req)
+		atomic.AddInt32(&a.inFlight, -1)
+
 		conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
 		if err := encoder.Encode(resp); err != nil {
 			fmt.Fprintf(os.Stderr, "Write error to %s: %v\n", conn.RemoteAddr(), err)
@@ -226,7 +270,6 @@ func (a *Agent) handleExec(req *Request) Response {
 		return Response{ID: req.ID, Error: &Error{Code: -32602, Message: "cmd required"}}
 	}
 
-	// Basic command validation (allowlist approach)
 	if !isSafeCommand(params.Cmd[0]) {
 		return Response{ID: req.ID, Error: &Error{
 			Code:    -32003,
@@ -293,7 +336,6 @@ func (a *Agent) handleFileWrite(req *Request) Response {
 		return Response{ID: req.ID, Error: &Error{Code: -32602, Message: err.Error()}}
 	}
 
-	// Validate path for security
 	if !isSafePath(params.Path) {
 		return Response{ID: req.ID, Error: &Error{
 			Code:    -32003,
@@ -324,9 +366,8 @@ func (a *Agent) handleFileWrite(req *Request) Response {
 		return Response{ID: req.ID, Error: &Error{Code: -32000, Message: err.Error()}}
 	}
 
-	// Log the file write operation
 	fmt.Printf("[AUDIT] File written: %s (%d bytes)\n", params.Path, len(content))
-	
+
 	return Response{ID: req.ID, Result: map[string]interface{}{"written": len(content)}}
 }
 
@@ -336,7 +377,6 @@ func (a *Agent) handleFileRead(req *Request) Response {
 		return Response{ID: req.ID, Error: &Error{Code: -32602, Message: err.Error()}}
 	}
 
-	// Validate path for security
 	if !isSafePath(params.Path) {
 		return Response{ID: req.ID, Error: &Error{
 			Code:    -32003,
@@ -353,7 +393,6 @@ func (a *Agent) handleFileRead(req *Request) Response {
 		return Response{ID: req.ID, Error: &Error{Code: -32000, Message: "file too large"}}
 	}
 
-	// Don't allow reading sensitive files
 	if isSensitiveFile(params.Path) {
 		return Response{ID: req.ID, Error: &Error{
 			Code:    -32003,
@@ -400,60 +439,79 @@ func (a *Agent) handleHealth(req *Request) Response {
 }
 
 func (a *Agent) handleShutdown(req *Request) Response {
-	// Log shutdown request
 	fmt.Printf("[AUDIT] Shutdown requested by client\n")
-	
+
 	go func() {
-		time.Sleep(100 * time.Millisecond)
+		// Wait for in-flight requests to complete (max 10s grace period)
+		deadline := time.Now().Add(10 * time.Second)
+		for atomic.LoadInt32(&a.inFlight) > 0 && time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+		}
 		syscall.Sync()
 		syscall.Reboot(syscall.LINUX_REBOOT_CMD_POWER_OFF)
 	}()
 	return Response{ID: req.ID, Result: map[string]string{"status": "shutting_down"}}
 }
 
-// Security helper functions
+// ── Security ───────────────────────────────────────────────────
+
 func isSafeCommand(cmd string) bool {
-	// Very basic allowlist - expand based on your needs
-	safeCommands := []string{
-		"/bin/", "/usr/bin/", "/usr/local/bin/",
-		"ls", "cat", "echo", "grep", "find", "ps", "top",
-		"systemctl", "journalctl", "docker", "podman",
+	// Exact prefix match — not substring (was strings.Contains, which
+	// allowed "scat" to pass because it contains "cat").
+	safePrefixes := []string{
+		"/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/",
 	}
-	
-	for _, safe := range safeCommands {
-		if strings.Contains(cmd, safe) {
+
+	for _, prefix := range safePrefixes {
+		if strings.HasPrefix(cmd, prefix) {
 			return true
 		}
 	}
+
+	// Allow common commands by exact name
+	safeCommands := []string{
+		"ls", "cat", "echo", "grep", "find", "ps", "top", "pkill",
+		"cp", "mv", "rm", "mkdir", "rmdir", "touch", "chmod", "chown",
+		"head", "tail", "wc", "sort", "uniq", "cut", "tr", "sed", "awk",
+		"curl", "wget", "tar", "gzip", "gunzip", "zip", "unzip",
+		"python", "python3", "pip", "pip3", "node", "npm", "ruby", "perl",
+		"git", "make", "gcc", "g++", "cargo", "go", "rustc",
+		"sh", "bash", "dash", "env", "export", "which", "id", "whoami",
+		"sleep", "true", "false", "test", "date",
+		"systemctl", "journalctl",
+	}
+	for _, safe := range safeCommands {
+		if cmd == safe {
+			return true
+		}
+	}
+
 	return false
 }
 
 func isSafePath(path string) bool {
-	// Disallow absolute paths to sensitive locations
 	deniedPrefixes := []string{
-		"/proc/", "/sys/", "/dev/", "/boot/", 
+		"/proc/", "/sys/", "/dev/", "/boot/",
 		"/etc/shadow", "/etc/passwd", "/etc/sudoers",
 		"/root/.ssh/", "/var/lib/", "/usr/lib/",
 	}
-	
+
 	for _, prefix := range deniedPrefixes {
 		if strings.HasPrefix(path, prefix) {
 			return false
 		}
 	}
-	
-	// Allow paths in /tmp, /var/log, /var/tmp, and current working directories
+
 	allowedPrefixes := []string{
 		"/tmp/", "/var/log/", "/var/tmp/", "/home/",
 	}
-	
+
 	for _, prefix := range allowedPrefixes {
 		if strings.HasPrefix(path, prefix) {
 			return true
 		}
 	}
-	
-	// Allow relative paths in current directory
+
 	return !filepath.IsAbs(path) || strings.HasPrefix(path, "./")
 }
 
@@ -461,9 +519,9 @@ func isSensitiveFile(path string) bool {
 	sensitiveFiles := []string{
 		"/etc/shadow", "/etc/passwd", "/etc/sudoers",
 		"/root/.ssh/authorized_keys", "/root/.ssh/id_rsa",
-		"/etc/ssh/ssh_host_rsa_key", 
+		"/etc/ssh/ssh_host_rsa_key",
 	}
-	
+
 	for _, sensitive := range sensitiveFiles {
 		if path == sensitive {
 			return true
@@ -471,6 +529,8 @@ func isSensitiveFile(path string) bool {
 	}
 	return false
 }
+
+// ── Buffer ─────────────────────────────────────────────────────
 
 type syncBuffer struct {
 	mu  sync.Mutex
