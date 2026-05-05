@@ -54,7 +54,8 @@ defmodule Zypi.Session.Manager do
 
   @doc "Execute a command in an existing session."
   def exec(session_id, cmd, opts \\ []) do
-    GenServer.call(__MODULE__, {:exec, session_id, cmd, opts}, 60_000)
+    timeout_ms = (Keyword.get(opts, :timeout, 60) + 10) * 1000
+    GenServer.call(__MODULE__, {:exec, session_id, cmd, opts}, timeout_ms)
   end
 
   @doc "Get session info."
