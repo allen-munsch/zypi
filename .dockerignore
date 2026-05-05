@@ -12,6 +12,5 @@ deps/
 context/
 accelerated-container-image/
 .zypi/
-kernel/
 erl_crash.dump
 __pycache__/
