@@ -178,6 +178,9 @@ RUN mkdir -p "$OVERLAYBD_DATA_DIR/images" && \
     chmod 600 /opt/overlaybd/cred.json
 
 
+# Copy guest agent binary into image (needed for rootfs injection at startup)
+COPY guest-agent/zypi-agent /opt/zypi/bin/zypi-agent
+
 # Elixir setup
 RUN mix local.hex --force && mix local.rebar --force
 
