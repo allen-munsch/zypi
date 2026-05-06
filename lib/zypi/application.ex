@@ -143,22 +143,32 @@ defmodule Zypi.Application do
     # Create bridge if it doesn't exist
     case System.cmd("ip", ["link", "show", bridge_name], stderr_to_stdout: true) do
       {_, 0} ->
-        # Bridge exists
-        :ok
+        # Bridge exists (e.g., container restart). Ensure it's up.
+        System.cmd("ip", ["link", "set", bridge_name, "up"])
       _ ->
         # Create bridge
         System.cmd("ip", ["link", "add", bridge_name, "type", "bridge"])
         System.cmd("ip", ["addr", "add", "#{gateway_ip}/24", "dev", bridge_name])
         System.cmd("ip", ["link", "set", bridge_name, "up"])
-        
-        # Enable IP forwarding
-        System.cmd("sysctl", ["-w", "net.ipv4.ip_forward=1"])
-        
-        # Setup NAT
-        System.cmd("iptables", ["-t", "nat", "-A", "POSTROUTING", "-s", "10.0.0.0/24", "-j", "MASQUERADE"])
+    end
+
+    # Always ensure iptables rules exist (container restart clears them)
+    System.cmd("sysctl", ["-w", "net.ipv4.ip_forward=1"])
+
+    # Add NAT rule if not already present (container restart clears iptables)
+    case System.cmd("iptables", ["-t", "nat", "-C", "POSTROUTING", "-s", "10.0.0.0/24", "-j", "MASQUERADE"], stderr_to_stdout: true) do
+      {_, 0} -> :ok
+      _ -> System.cmd("iptables", ["-t", "nat", "-A", "POSTROUTING", "-s", "10.0.0.0/24", "-j", "MASQUERADE"])
+    end
+
+    # Ensure FORWARD rules exist
+    for iface <- ["-i", "-o"] do
+      case System.cmd("iptables", ["-C", "FORWARD", iface, bridge_name, "-j", "ACCEPT"], stderr_to_stdout: true) do
+        {_, 0} -> :ok
+        _ -> System.cmd("iptables", ["-A", "FORWARD", iface, bridge_name, "-j", "ACCEPT"])
+      end
     end
     
-    require Logger
     Logger.info("Network bridge #{bridge_name} configured")
   end
 
