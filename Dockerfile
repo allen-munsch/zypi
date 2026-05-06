@@ -129,18 +129,15 @@ RUN mkdir -p /opt/zypi/rootfs && \
     chroot squashfs-root /bin/bash -c ' \
       set -e && \
       apt-get update && \
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server bridge-utils netcat-openbsd python3-pip curl wget && \
-      # Ubuntu 24.04 ships chromium as a snap — install from Debian/Ubuntu PPA instead
-      add-apt-repository -y ppa:xtradeb/apps 2>/dev/null && \
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium 2>/dev/null || \
-      # Fallback: download portable chromium
-      (mkdir -p /opt/chromium && \
-       wget -q "https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/LAST_CHANGE" -O /tmp/rev && \
-       CHROMIUM_REV=$(cat /tmp/rev) && \
-       wget -q "https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/${CHROMIUM_REV}/chrome-linux.zip" -O /tmp/chrome.zip && \
-       unzip -q /tmp/chrome.zip -d /opt/chromium && \
-       ln -sf /opt/chromium/chrome-linux/chrome /usr/bin/chromium-browser && \
-       rm /tmp/rev /tmp/chrome.zip) || echo "WARNING: chromium install failed — browser features unavailable" && \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server bridge-utils netcat-openbsd python3-pip curl wget unzip && \
+      set +e && \
+      mkdir -p /opt/chromium && \
+      CHROMIUM_REV=$(wget -qO- "https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/LAST_CHANGE") && \
+      wget -q "https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/${CHROMIUM_REV}/chrome-linux.zip" -O /tmp/chrome.zip && \
+      unzip -q /tmp/chrome.zip -d /opt/chromium && \
+      ln -sf /opt/chromium/chrome-linux/chrome /usr/bin/chromium-browser && \
+      rm -f /tmp/chrome.zip || echo "WARNING: chromium download failed" && \
+      set -e && \
       ssh-keygen -A && \
       cat > /etc/inittab <<EOF \
 ttyS0::respawn:/sbin/agetty -L 115200 ttyS0 linux \

@@ -178,7 +178,7 @@ defmodule Zypi.Image.InitGenerator do
 
     # Egress proxy — if iron-proxy is running on the gateway, route through it.
     # Set ZYPI_EGRESS_PROXY=1 env var on the Zypi host to enable.
-    if [ "\$ZYPI_EGRESS_PROXY" = "1" ]; then
+    if [ "$ZYPI_EGRESS_PROXY" = "1" ]; then
       export http_proxy=http://10.0.0.1:8080
       export https_proxy=http://10.0.0.1:8080
       export HTTP_PROXY=http://10.0.0.1:8080
