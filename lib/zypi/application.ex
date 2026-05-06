@@ -4,6 +4,7 @@ defmodule Zypi.Application do
   """
 
   use Application
+  require Logger
   require Zypi.Telemetry
 
   @impl true
