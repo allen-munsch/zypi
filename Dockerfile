@@ -1,6 +1,7 @@
 # --- Build Arguments ---
 ARG ELIXIR_VERSION=1.19.3
 ARG OTP_VERSION=28
+ARG CACHE_BUST=1
 ARG FC_VERSION=1.13.1
 
 # --- Stage 1: Build overlaybd ---
@@ -110,7 +111,8 @@ RUN if [ -s /opt/zypi/kernel/vmlinux ]; then \
     chmod +x /opt/zypi/kernel/vmlinux
 
 # Build Ubuntu rootfs with SSH
-RUN mkdir -p /opt/zypi/rootfs && \
+ARG CACHE_BUST
+RUN echo "rootfs build cache bust: $CACHE_BUST" && mkdir -p /opt/zypi/rootfs && \
     ARCH="$(uname -m)" && \
     release_url="https://github.com/firecracker-microvm/firecracker/releases" && \
     latest_version=$(basename $(curl -fsSLI -o /dev/null -w %{url_effective} ${release_url}/latest)) && \
