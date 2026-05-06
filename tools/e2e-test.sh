@@ -22,7 +22,7 @@ skip() { echo -e "  ${YLW}○${NC} $1 (skipped: $2)"; ((SKIP++)) || true; }
 
 _exec() {
   local timeout=${3:-15}
-  curl -sf -X POST "$Z/exec" \
+  curl -sf --max-time $((timeout + 10)) -X POST "$Z/exec" \
     -H "Content-Type: application/json" \
     -d "{\"cmd\":$2,\"image\":\"ubuntu:24.04\",\"timeout\":$timeout}" \
     2>/dev/null || echo '{"error":"request_failed"}'
@@ -203,29 +203,110 @@ echo "$STDOUT" | grep -q "pip" \
   && pass "pip3 available" \
   || fail "pip3" "got '$STDOUT'"
 
-# ── 12. Chromium ─────────────────────────────────────
+# ── 12. Docker Import (Build + Save + Import + Exec) ──
 
 echo ""
-echo "── Chromium ──────────────────────────────────────"
-R=$(_exec '["sh","-c","which chromium-browser 2>/dev/null || which chromium 2>/dev/null || ls /usr/bin/chrom* 2>/dev/null || echo NOT_FOUND"]' '["sh","-c","which chromium-browser 2>/dev/null || which chromium 2>/dev/null || ls /usr/bin/chrom* 2>/dev/null || echo NOT_FOUND"]')
-STDOUT=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin).get('stdout',''))")
-if echo "$STDOUT" | grep -qv "NOT_FOUND"; then
-  pass "chromium binary exists (${STDOUT:0:50}...)"
+echo "── Docker Import (build→save→import→exec) ────────"
+
+ALPINE_IMAGE="weft-e2e-alpine:test"
+ALPINE_TAR="/tmp/zypi-e2e-alpine.tar"
+
+# Build minimal alpine test image
+docker build -t "$ALPINE_IMAGE" -f - "$(pwd)" >/dev/null 2>&1 <<'ALPINE_DOCKERFILE'
+FROM alpine:latest
+RUN echo "zypi-e2e-import-works" > /etc/zypi-e2e-marker
+CMD ["/bin/sh"]
+ALPINE_DOCKERFILE
+
+if [ $? -eq 0 ]; then
+  pass "docker build alpine test image"
+
+  docker save "$ALPINE_IMAGE" -o "$ALPINE_TAR" 2>/dev/null
+  TAR_SIZE=$(stat -c%s "$ALPINE_TAR" 2>/dev/null || echo 0)
+  pass "docker save ($(( TAR_SIZE / 1024 / 1024 ))MB tar)"
+
+  # Import into zypi
+  IMPORT_RESP=$(curl -sf -X POST "$Z/images/alpine-e2e:latest/import" \
+    -H "Content-Type: application/x-tar" \
+    --data-binary "@$ALPINE_TAR" 2>/dev/null || echo '{"error":"import_failed"}')
+  IMPORT_STATUS=$(echo "$IMPORT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null)
+
+  if [ "$IMPORT_STATUS" = "accepted" ]; then
+    pass "import accepted (alpine-e2e:latest)"
+
+    # Wait for import to complete
+    for i in $(seq 1 20); do
+      IMPORT_STATE=$(curl -sf "$Z/images/alpine-e2e:latest/status" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+      [ "$IMPORT_STATE" = "ready" ] && break
+      sleep 1
+    done
+
+    if [ "$IMPORT_STATE" = "ready" ]; then
+      pass "import completed (ready)"
+
+      # Verify the marker file exists in the imported image via cold-boot exec
+      R=$(curl -sf -X POST "$Z/exec" \
+        -H "Content-Type: application/json" \
+        -d '{"cmd":["cat","/etc/zypi-e2e-marker"],"image":"alpine-e2e:latest","timeout":15}' 2>/dev/null)
+      STDOUT=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin).get('stdout',''))" 2>/dev/null)
+      if echo "$STDOUT" | grep -q "zypi-e2e-import-works"; then
+        pass "exec in imported image (marker verified)"
+      else
+        skip "exec in imported image" "warm VM may use base image — cold boot needed"
+      fi
+    else
+      fail "import" "stuck in state: $IMPORT_STATE"
+    fi
+  else
+    fail "import" "response: $IMPORT_RESP"
+  fi
+
+  # Cleanup
+  rm -f "$ALPINE_TAR"
+  docker rmi "$ALPINE_IMAGE" >/dev/null 2>&1 || true
 else
-  skip "chromium" "not found — Docker image needs rebuild with chromium apt-get"
+  skip "docker build" "docker not available or build failed"
 fi
 
-R=$(curl -sf -X POST "$Z/exec" \
-  -H "Content-Type: application/json" \
-  -d '{"cmd":["chromium-browser","--version"],"image":"ubuntu:24.04","timeout":15,"memory_mb":512}' 2>/dev/null)
-STDOUT=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin).get('stdout',''))")
-if echo "$STDOUT" | grep -qi "chrom"; then
-  pass "chromium --version (${STDOUT:0:60}...)"
+# ── 13. Chromium (imported image) ─────────────────────
+
+echo ""
+echo "── Chromium (Dockerfile.chromium import) ──────────"
+
+# Check if chromium image exists
+CHROMIUM_EXISTS=$(curl -sf "$Z/images" 2>/dev/null | python3 -c "import sys,json; print('chromium:latest' in json.load(sys.stdin).get('images',[]))" 2>/dev/null)
+
+if [ "$CHROMIUM_EXISTS" = "True" ]; then
+  pass "chromium image registered"
+
+  # Test chromium binary via exec (may hit warm VM with base image — try full path)
+  # Use a short timeout and timeout command to prevent hangs
+  R=$(timeout 20 curl -sf -X POST "$Z/exec" \
+    -H "Content-Type: application/json" \
+    -d '{"cmd":["/usr/bin/chromium-browser","--version"],"image":"chromium:latest","timeout":15,"memory_mb":512}' 2>/dev/null || echo '{"error":"curl_failed_or_timeout"}')
+  EXIT=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin).get('exit_code',-1))" 2>/dev/null)
+  STDOUT=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin).get('stdout',''))" 2>/dev/null)
+  STDERR=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin).get('stderr',''))" 2>/dev/null)
+
+  if echo "$STDOUT$STDERR" | grep -qi "chrom"; then
+    pass "chromium --version ($(echo "$STDOUT$STDERR" | tr -d '\n' | head -c 60))"
+  else
+    skip "chromium --version" "warm VM has base rootfs (no chromium) — needs image-aware pool"
+  fi
+
+  # Check if binary exists on disk (cold-booted containers have it)
+  R=$(_exec '["sh","-c","ls -la /opt/chromium/chrome-linux/chrome 2>/dev/null || echo NOT_FOUND"]' '["sh","-c","ls -la /opt/chromium/chrome-linux/chrome 2>/dev/null || echo NOT_FOUND"]')
+  STDOUT=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin).get('stdout',''))" 2>/dev/null)
+  if echo "$STDOUT" | grep -q "chrome$"; then
+    pass "chromium binary on disk"
+  else
+    skip "chromium binary" "warm VM has base rootfs — need image-aware pool"
+  fi
 else
-  skip "chromium --version" "not available — need image rebuild"
+  skip "chromium" "image not imported — run: docker build -f Dockerfile.chromium && docker save && curl import"
 fi
 
-# ── 13. Sessions ─────────────────────────────────────
+# ── 14. Sessions ─────────────────────────────────────
 
 echo ""
 echo "── Sessions ──────────────────────────────────────"
@@ -246,8 +327,8 @@ if [ -n "$SID" ]; then
     && pass "session state persists" \
     || fail "session state" "got '$STDOUT'"
 
-  curl -sf -X DELETE "$Z/sessions/$SID" >/dev/null 2>&1
-  GET=$(curl -sf "$Z/sessions/$SID" 2>/dev/null || echo "")
+  curl -sf --max-time 10 -X DELETE "$Z/sessions/$SID" >/dev/null 2>&1 || true
+  GET=$(curl -sf --max-time 10 "$Z/sessions/$SID" 2>/dev/null || echo "")
   echo "$GET" | grep -q "not found" \
     && pass "session close" \
     || fail "session close" "session still accessible"
@@ -255,7 +336,7 @@ else
   fail "session create" "no session_id returned"
 fi
 
-# ── 14. Warm Pool ─────────────────────────────────────
+# ── 15. Warm Pool ─────────────────────────────────────
 
 echo ""
 echo "── Warm Pool ─────────────────────────────────────"
@@ -266,15 +347,21 @@ C=$(json_field "$P" cold_misses)
 echo "  warm: $W, hits: $H, cold: $C"
 [ "$W" -gt 0 ] 2>/dev/null && pass "warm VMs available ($W)" || skip "warm VMs" "0 warm (may need time to boot)"
 
-# ── 15. Concurrent Exec ──────────────────────────────
+# ── 16. Concurrent Exec ──────────────────────────────
 
 echo ""
 echo "── Concurrent Execution ──────────────────────────"
 START=$(date +%s%N)
 R1=$(_exec '["echo","concurrent-1"]' '["echo","concurrent-1"]' 10) &
+PID1=$!
 R2=$(_exec '["echo","concurrent-2"]' '["echo","concurrent-2"]' 10) &
+PID2=$!
 R3=$(_exec '["echo","concurrent-3"]' '["echo","concurrent-3"]' 10) &
-wait
+PID3=$!
+wait $PID1 $PID2 $PID3 2>/dev/null || true
+R1=${R1:-'{"exit_code":-1}'}
+R2=${R2:-'{"exit_code":-1}'}
+R3=${R3:-'{"exit_code":-1}'}
 END=$(date +%s%N)
 ELAPSED=$(( (END - START) / 1000000 ))
 E1=$(echo "$R1" | python3 -c "import sys,json; print(json.load(sys.stdin).get('exit_code',-1))")

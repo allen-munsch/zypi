@@ -157,10 +157,16 @@ defmodule Zypi.Runtime.Firecracker do
     bridge_name = "zypi0"
 
     System.cmd("ip", ["tuntap", "add", tap_name, "mode", "tap"], stderr_to_stdout: true)
+    System.cmd("ip", ["link", "set", tap_name, "mtu", "1400"], stderr_to_stdout: true)
     System.cmd("ip", ["link", "set", tap_name, "up"], stderr_to_stdout: true)
     System.cmd("ip", ["link", "set", tap_name, "promisc", "on"], stderr_to_stdout: true)
     System.cmd("ip", ["link", "set", tap_name, "master", bridge_name], stderr_to_stdout: true)
     System.cmd("sysctl", ["-w", "net.ipv4.ip_forward=1"], stderr_to_stdout: true)
+
+    # Clamp TCP MSS to prevent PMTUD black holes through the bridge (fixes TLS/HTTPS)
+    System.cmd("iptables", ["-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+                            "-o", bridge_name, "-j", "TCPMSS", "--clamp-mss-to-pmtu"],
+               stderr_to_stdout: true)
 
     {:ok, tap_name}
   end

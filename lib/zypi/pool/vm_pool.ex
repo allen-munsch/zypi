@@ -256,14 +256,14 @@ defmodule Zypi.Pool.VMPool do
     state = %{state | pending_boots: max(0, state.pending_boots - 1)}
 
     case result do
-      {:ok, vm_state, ip, rootfs} ->
+      {:ok, vm_state, ip, rootfs, image} ->
         vm = %VMSlot{
           id: vm_id,
           vm_state: vm_state,
           ip: ip,
           rootfs: rootfs,
           status: :warm,
-          image: nil,
+          image: image,
           created_at: DateTime.utc_now()
         }
 
@@ -272,8 +272,12 @@ defmodule Zypi.Pool.VMPool do
           warm_queue: state.warm_queue ++ [vm_id]
         }
 
+        # Register in per-image pool
+        image_pools = Map.update(state.image_pools, image, [vm_id], &(&1 ++ [vm_id]))
+        state = %{state | image_pools: image_pools}
+
         state = update_metrics(state, :total_boots)
-        Logger.info("VMPool: VM #{vm_id} booted and warm at #{format_ip(ip)}")
+        Logger.info("VMPool: VM #{vm_id} booted and warm at #{format_ip(ip)} (image=#{image})")
         {:noreply, state}
 
       {:error, reason} ->
@@ -399,7 +403,7 @@ defmodule Zypi.Pool.VMPool do
     if image do
       case Map.get(state.image_pools, image, []) do
         [vm_id | _] -> {:ok, vm_id}
-        [] -> find_generic_warm_vm(state)
+        [] -> :none  # no image-specific warm VM — trigger cold boot with correct rootfs
       end
     else
       find_generic_warm_vm(state)
@@ -486,7 +490,7 @@ defmodule Zypi.Pool.VMPool do
       Task.start(fn ->
         result = boot_warm_vm(vm_id, image)
         case result do
-          {:ok, vm_state, _ip, _rootfs} ->
+          {:ok, vm_state, _ip, _rootfs, _image} ->
             port = vm_state[:pid]
             if port && is_port(port) do
               Process.unlink(port)
@@ -502,23 +506,24 @@ defmodule Zypi.Pool.VMPool do
   end
   defp spawn_warm_vms(state, _count, _image), do: state
 
-  defp boot_warm_vm(vm_id, _image) do
+  defp boot_warm_vm(vm_id, image) do
     case IPPool.acquire() do
       {:ok, ip} ->
         # Create a dedicated rootfs copy for this VM
-        case create_vm_rootfs(vm_id) do
+        case create_vm_rootfs(vm_id, image) do
           {:ok, rootfs_path} ->
             container = %{
               id: vm_id,
               ip: ip,
               rootfs: rootfs_path,
+              image: image || "ubuntu:24.04",
               resources: %{cpu: 1, memory_mb: 256}
             }
 
             case RuntimeFirecracker.start(container) do
               {:ok, vm_state} ->
                 case wait_for_agent(ip) do
-                  :ok -> {:ok, vm_state, ip, rootfs_path}
+                  :ok -> {:ok, vm_state, ip, rootfs_path, image || "ubuntu:24.04"}
                   {:error, reason} ->
                     RuntimeFirecracker.stop(%{id: vm_id, pid: vm_state})
                     IPPool.release(ip)
@@ -543,17 +548,26 @@ defmodule Zypi.Pool.VMPool do
 
   @doc """
   Create a copy-on-write snapshot of the base rootfs for a specific VM.
+  When image is specified, uses that image's ext4 instead of base.
   """
-  defp create_vm_rootfs(vm_id) do
-    base_rootfs = base_rootfs_path()
+  defp create_vm_rootfs(vm_id, image \\ nil) do
+    source_rootfs = if image do
+      case Zypi.Pool.ImageStore.get_image(image) do
+        {:ok, %{ext4_path: path}} -> path
+        _ -> base_rootfs_path()
+      end
+    else
+      base_rootfs_path()
+    end
+
     vm_dir = Path.join(data_dir(), "vms/#{vm_id}")
     File.mkdir_p!(vm_dir)
     vm_rootfs = Path.join(vm_dir, "rootfs.ext4")
 
-    Logger.debug("VMPool: Creating rootfs copy for #{vm_id}: #{base_rootfs} -> #{vm_rootfs}")
+    Logger.debug("VMPool: Creating rootfs copy for #{vm_id}: #{source_rootfs} -> #{vm_rootfs} (image=#{image || "base"})")
 
     # Use reflink for instant CoW copy if supported, falls back to regular copy
-    case System.cmd("cp", ["--reflink=auto", "--sparse=always", base_rootfs, vm_rootfs],
+    case System.cmd("cp", ["--reflink=auto", "--sparse=always", source_rootfs, vm_rootfs],
                     stderr_to_stdout: true) do
       {_, 0} ->
         Logger.debug("VMPool: Rootfs copy created for #{vm_id} (#{File.stat!(vm_rootfs).size} bytes)")

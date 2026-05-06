@@ -237,10 +237,14 @@ end
     end
   end
 
-  defp apply_layer_with_retry(layer, ext4_path, attempt \\ 1) do
+  # Apply a Docker layer to a mounted ext4 filesystem.
+  # Docker layers are gzip-compressed tar archives; overlaybd-apply is
+  # unreliable on raw ext4 (segfaults, silent corruption), so we use
+  # GNU tar which auto-detects compression.
+  defp apply_layer_to_mount(layer, mount_point, attempt \\ 1) do
     layer_name = Path.basename(layer)
 
-    case System.cmd("overlaybd-apply", [layer, ext4_path, "--raw"], stderr_to_stdout: true) do
+    case System.cmd("tar", ["xzf", layer, "-C", mount_point], stderr_to_stdout: true) do
       {_, 0} ->
         :ok
 
@@ -248,12 +252,12 @@ end
         delay = @retry_base_delay_ms * :math.pow(2, attempt - 1) |> round()
         Logger.warning("Layer #{layer_name} failed (attempt #{attempt}/#{ @max_layer_retries}), retrying in #{delay}ms. Exit code: #{exit_code}, Output: #{String.slice(output, 0, 500)}")
         Process.sleep(delay)
-        apply_layer_with_retry(layer, ext4_path, attempt + 1)
+        apply_layer_to_mount(layer, mount_point, attempt + 1)
 
       {output, exit_code} ->
         Logger.error("Layer #{layer_name} failed after #{ @max_layer_retries} attempts. Exit code: #{exit_code}")
         Logger.error("Layer path: #{layer}")
-        Logger.error("Target: #{ext4_path}")
+        Logger.error("Mount point: #{mount_point}")
         Logger.error("Output: #{output}")
         {:error, {:layer_failed, layer_name, exit_code, output}}
     end
@@ -475,37 +479,52 @@ end
     Logger.info("Base image copied in #{copy_time}ms")
 
     total_layers = length(docker_layers)
-    Logger.info("Applying #{total_layers} layers with overlaybd-apply...")
+    Logger.info("Applying #{total_layers} layers via mount + tar...")
+
+    # Mount the ext4 once, apply all layers, then unmount.
+    # overlaybd-apply is unreliable on raw ext4 (segfaults / silent corruption).
+    mount_point = "/tmp/zypi-build-#{System.unique_integer([:positive])}"
+    File.mkdir_p!(mount_point)
+
+    case System.cmd("mount", ["-o", "loop", ext4_path, mount_point], stderr_to_stdout: true) do
+      {_, 0} -> :ok
+      {output, code} -> throw({:error, {:mount_failed, code, output}})
+    end
 
     layers_start = System.monotonic_time(:millisecond)
 
-    result = docker_layers
-    |> Enum.with_index(1)
-    |> Enum.reduce_while(:ok, fn {layer, index}, :ok ->
-      layer_start = System.monotonic_time(:millisecond)
-      layer_name = Path.basename(layer)
-      layer_size = File.stat!(layer).size
+    result = try do
+      docker_layers
+      |> Enum.with_index(1)
+      |> Enum.reduce_while(:ok, fn {layer, index}, :ok ->
+        layer_start = System.monotonic_time(:millisecond)
+        layer_name = Path.basename(layer)
+        layer_size = File.stat!(layer).size
 
-      Logger.info("  Layer #{index}/#{total_layers}: #{layer_name} (#{div(layer_size, 1024)} KB)")
+        Logger.info("  Layer #{index}/#{total_layers}: #{layer_name} (#{div(layer_size, 1024)} KB)")
 
-      case apply_layer_with_retry(layer, ext4_path) do
-        :ok ->
-          layer_time = System.monotonic_time(:millisecond) - layer_start
-          progress = 30 + div(60 * index, total_layers)
-          Zypi.Store.Images.update_progress(ref, :applying_layers, progress, %{applied_layers: index})
+        case apply_layer_to_mount(layer, mount_point) do
+          :ok ->
+            layer_time = System.monotonic_time(:millisecond) - layer_start
+            progress = 30 + div(60 * index, total_layers)
+            Zypi.Store.Images.update_progress(ref, :applying_layers, progress, %{applied_layers: index})
 
-          :telemetry.execute( @telemetry_prefix ++ [:layer_applied],
-            %{duration_ms: layer_time, index: index, total: total_layers},
-            %{ref: ref, layer: layer_name})
+            :telemetry.execute( @telemetry_prefix ++ [:layer_applied],
+              %{duration_ms: layer_time, index: index, total: total_layers},
+              %{ref: ref, layer: layer_name})
 
-          Logger.info("  Layer #{index}/#{total_layers} applied in #{layer_time}ms")
-          {:cont, :ok}
+            Logger.info("  Layer #{index}/#{total_layers} applied in #{layer_time}ms")
+            {:cont, :ok}
 
-        {:error, _} = error ->
-          Logger.error("  Layer #{index}/#{total_layers} FAILED")
-          {:halt, error}
-      end
-    end)
+          {:error, _} = error ->
+            Logger.error("  Layer #{index}/#{total_layers} FAILED")
+            {:halt, error}
+        end
+      end)
+    after
+      System.cmd("umount", [mount_point], stderr_to_stdout: true)
+      File.rmdir(mount_point)
+    end
 
     layers_time = System.monotonic_time(:millisecond) - layers_start
     Logger.info("All layers applied in #{layers_time}ms")
