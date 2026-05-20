@@ -1,0 +1,900 @@
+openapi: 3.0.3
+info:
+  title: Zypi API
+  description: |
+    Firecracker microVM sandbox runtime. Sub-second boots, CoW rootfs snapshots,
+    one-shot execution, long-lived sessions, and image pre-warming.
+
+    ## Quickstart
+
+    ```python
+    from zypi_client import ZypiClient
+    client = ZypiClient('http://localhost:4000')
+    exit_code, stdout, stderr = client.exec(['python', 'analyze_data.py'])
+    ```
+
+    ## Architecture
+
+    Zypi runs Firecracker microVMs on a per-node basis. Each node manages:
+    - A pool of warm VMs (pre-booted, waiting for commands)
+    - Image store (OCI images pulled and cached as CoW rootfs layers)
+    - Session manager (long-lived VMs for multi-step agent workflows)
+
+    ## Authentication
+
+    All endpoints are public (no auth required). Zypi is an internal
+    cluster service — auth is handled at the ingress/weft layer.
+
+    ## Streaming
+
+    `/exec` and `/sessions/:id/exec` support SSE streaming via `stream: true`
+    in the request body. Events: stdout, stderr, result, error.
+
+    ## MCP Integration
+
+    Zypi exposes an MCP (Model Context Protocol) endpoint at `/mcp`
+    for AI agent tool discovery and invocation via yas-mcp proxy.
+  version: 0.2.0
+  contact:
+    name: Zypi Maintainers
+    url: https://github.com/allen-munsch/zypi
+servers:
+  - url: http://localhost:4000
+    description: Local development
+  - url: http://zypi-node:4000
+    description: Docker Compose (cluster internal)
+tags:
+  - name: Health
+  - name: Images
+  - name: Containers
+  - name: Exec
+  - name: Sessions
+  - name: Pool
+  - name: Discovery
+components:
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message or reason atom
+
+    ExecRequest:
+      type: object
+      required:
+        - cmd
+      properties:
+        cmd:
+          type: array
+          items:
+            type: string
+          description: Command to execute (e.g., ["python", "script.py"])
+          example: ["/bin/sh", "-c", "echo hello"]
+        image:
+          type: string
+          description: OCI image to use
+          example: "ubuntu:24.04"
+        timeout:
+          type: integer
+          description: "Timeout in seconds (default: 60)"
+          example: 30
+        env:
+          type: object
+          description: Environment variables
+          additionalProperties:
+            type: string
+          example: { "MY_VAR": "value" }
+        workdir:
+          type: string
+          description: Working directory inside sandbox
+        files:
+          type: object
+          description: Files to inject into sandbox (path -> content)
+          additionalProperties:
+            type: string
+        memory_mb:
+          type: integer
+          description: "Memory limit in MB (default: 256)"
+          example: 512
+        vcpus:
+          type: integer
+          description: "vCPU count (default: 1)"
+          example: 2
+        agent_id:
+          type: string
+          description: Agent ID for attribution
+        stream:
+          type: boolean
+          description: Enable SSE streaming of stdout/stderr
+          example: false
+
+    ExecResponse:
+      type: object
+      properties:
+        exit_code:
+          type: integer
+          description: Process exit code
+        stdout:
+          type: string
+          description: Captured stdout
+        stderr:
+          type: string
+          description: Captured stderr
+        duration_ms:
+          type: integer
+          description: Wall-clock execution time in milliseconds
+        container_id:
+          type: string
+          description: Sandbox container ID
+        agent_id:
+          type: string
+          description: Agent ID (if provided in request)
+
+    SessionCreateRequest:
+      type: object
+      properties:
+        agent_id:
+          type: string
+          description: Agent ID for attribution
+        image:
+          type: string
+          description: "OCI image (default: ubuntu:24.04)"
+        vcpus:
+          type: integer
+          description: "vCPU count (default: 1)"
+        memory_mb:
+          type: integer
+          description: "Memory limit in MB (default: 256)"
+        metadata:
+          type: object
+          description: Arbitrary metadata
+
+    SessionResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+          description: Session ID
+        container_id:
+          type: string
+          description: Underlying sandbox container ID
+        ip:
+          type: string
+          description: Internal IP of the sandbox
+        image:
+          type: string
+          description: OCI image used
+        agent_id:
+          type: string
+          description: Agent ID
+        status:
+          type: string
+          enum: [running, closed, expired]
+        created_at:
+          type: string
+          format: date-time
+
+    SessionExecRequest:
+      type: object
+      required:
+        - cmd
+      properties:
+        cmd:
+          type: array
+          items:
+            type: string
+          description: Command to execute in the session sandbox
+        timeout:
+          type: integer
+          description: "Timeout in seconds (default: 30)"
+        env:
+          type: object
+          description: Environment variables
+        workdir:
+          type: string
+          description: Working directory
+        stream:
+          type: boolean
+          description: Enable SSE streaming
+
+    SessionExecResponse:
+      type: object
+      properties:
+        exit_code:
+          type: integer
+        stdout:
+          type: string
+        stderr:
+          type: string
+        timed_out:
+          type: boolean
+        session_id:
+          type: string
+        container_id:
+          type: string
+
+    ContainerResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        image:
+          type: string
+        status:
+          type: string
+          enum: [created, running, stopped, exited, destroyed]
+        ip:
+          type: string
+        rootfs:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+
+    ImageResponse:
+      type: object
+      properties:
+        ref:
+          type: string
+          description: "Image reference (e.g., ubuntu:24.04)"
+        status:
+          type: string
+          enum: [queued, importing, extracting, applying_layers, injecting_init, ready, failed]
+        progress:
+          type: integer
+        current_step:
+          type: string
+        total_layers:
+          type: integer
+        applied_layers:
+          type: integer
+        size_bytes:
+          type: integer
+        error_message:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+
+    ImageImportResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "accepted"
+        ref:
+          type: string
+
+    WarmRequest:
+      type: object
+      properties:
+        count:
+          type: integer
+          description: "Number of VMs to pre-warm (max: 10)"
+          example: 3
+
+    WarmStatusResponse:
+      type: object
+      properties:
+        image:
+          type: string
+        warm_vms:
+          type: integer
+        pool_stats:
+          type: object
+
+    PoolStats:
+      type: object
+      properties:
+        total_vms:
+          type: integer
+        warm_vms:
+          type: integer
+        active_vms:
+          type: integer
+        by_image:
+          type: object
+          additionalProperties:
+            type: integer
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ok"
+        timestamp:
+          type: string
+          format: date-time
+
+    StatusResponse:
+      type: object
+      properties:
+        containers:
+          type: object
+          description: Container counts by status
+        images:
+          type: integer
+          description: Total images available
+
+    AgentCard:
+      type: object
+      description: A2A Agent Card — describes Zypi as a discoverable agent
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        description:
+          type: string
+        url:
+          type: string
+        provider:
+          type: object
+        capabilities:
+          type: object
+        endpoints:
+          type: object
+        protocols:
+          type: object
+        auth:
+          type: object
+        health:
+          type: object
+        default_skills:
+          type: array
+          items:
+            type: object
+
+paths:
+  # ── Health ─────────────────────────────────────────────────────
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check
+      description: Returns service health status. No auth required.
+      operationId: zypi_health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /status:
+    get:
+      tags:
+        - Health
+      summary: Cluster status overview
+      description: Returns container counts by status and total images.
+      operationId: zypi_status
+      responses:
+        '200':
+          description: Cluster status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+
+  # ── Images ─────────────────────────────────────────────────────
+  /images:
+    get:
+      tags:
+        - Images
+      summary: List available images
+      operationId: zypi_images_list
+      responses:
+        '200':
+          description: List of images
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  images:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ImageResponse'
+
+  /images/{ref}/status:
+    get:
+      tags:
+        - Images
+      summary: Get image import status
+      operationId: zypi_image_status
+      parameters:
+        - name: ref
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "Image reference (e.g., ubuntu:24.04)"
+      responses:
+        '200':
+          description: Image status details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageResponse'
+        '404':
+          description: Image not found
+
+  /images/importing:
+    get:
+      tags:
+        - Images
+      summary: List active image imports
+      operationId: zypi_images_importing
+      responses:
+        '200':
+          description: Active imports with progress
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imports:
+                    type: array
+                    items:
+                      type: object
+                  count:
+                    type: integer
+
+  /images/{ref}/import:
+    post:
+      tags:
+        - Images
+      summary: Import an OCI image tar
+      description: |
+        Stream a tar archive of an OCI image to import.
+        Content-Type must be application/octet-stream, application/x-tar,
+        or application/gzip.
+      operationId: zypi_image_import
+      parameters:
+        - name: ref
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Image reference (e.g., ubuntu:24.04)
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '202':
+          description: Import accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageImportResponse'
+        '413':
+          description: Payload too large (max 500MB)
+        '415':
+          description: Unsupported media type
+
+  /images/{ref}:
+    delete:
+      tags:
+        - Images
+      summary: Delete an image
+      operationId: zypi_image_delete
+      parameters:
+        - name: ref
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Image deleted
+        '404':
+          description: Image not found
+
+  # ── Containers ─────────────────────────────────────────────────
+  /containers:
+    get:
+      tags:
+        - Containers
+      summary: List all containers
+      operationId: zypi_containers_list
+      responses:
+        '200':
+          description: Container list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  containers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ContainerResponse'
+
+    post:
+      tags:
+        - Containers
+      summary: Create a container
+      operationId: zypi_container_create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - id
+                - image
+              properties:
+                id:
+                  type: string
+                  description: Container ID
+                image:
+                  type: string
+                  description: Image reference
+                cmd:
+                  type: array
+                  items:
+                    type: string
+                  description: Entrypoint command
+                resources:
+                  type: object
+                  description: Resource limits
+      responses:
+        '201':
+          description: Container created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContainerResponse'
+
+  /containers/{id}:
+    get:
+      tags:
+        - Containers
+      summary: Get container details
+      operationId: zypi_container_get
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Container details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContainerResponse'
+        '404':
+          description: Container not found
+
+    delete:
+      tags:
+        - Containers
+      summary: Destroy a container
+      operationId: zypi_container_destroy
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Container destroyed
+
+  /containers/{id}/start:
+    post:
+      tags:
+        - Containers
+      summary: Start a container (launches Firecracker VM)
+      operationId: zypi_container_start
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Container started
+
+  /containers/{id}/stop:
+    post:
+      tags:
+        - Containers
+      summary: Stop a container
+      operationId: zypi_container_stop
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Container stopped
+
+  /containers/{id}/logs:
+    get:
+      tags:
+        - Containers
+      summary: Get container output logs
+      operationId: zypi_container_logs
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Container logs
+
+  # ── One-Shot Execution ─────────────────────────────────────────
+  /exec:
+    post:
+      tags:
+        - Exec
+      summary: Execute a command in a Firecracker microVM sandbox
+      description: |
+        One-shot sandbox execution. Spins up a Firecracker microVM, runs the
+        command, captures stdout/stderr, and destroys the VM. Sub-second boot
+        via CoW rootfs snapshots from pre-warmed VMs.
+
+        Set `stream: true` for SSE streaming of stdout, stderr, result events.
+      operationId: zypi_exec
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecRequest'
+      responses:
+        '200':
+          description: Command executed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecResponse'
+        '400':
+          description: Invalid request (cmd must be a list of strings)
+        '500':
+          description: Execution error
+
+  # ── Sessions ───────────────────────────────────────────────────
+  /sessions:
+    get:
+      tags:
+        - Sessions
+      summary: List all sessions
+      operationId: zypi_sessions_list
+      responses:
+        '200':
+          description: Session list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SessionResponse'
+                  count:
+                    type: integer
+
+    post:
+      tags:
+        - Sessions
+      summary: Create a long-lived sandbox session
+      description: |
+        Creates a Firecracker microVM that stays alive for multi-step
+        workflows. Auto-expires after 5 minutes of idle time.
+      operationId: zypi_session_create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionCreateRequest'
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+
+  /sessions/stats:
+    get:
+      tags:
+        - Sessions
+      summary: Get session statistics
+      operationId: zypi_sessions_stats
+      responses:
+        '200':
+          description: Session statistics
+
+  /sessions/{id}:
+    get:
+      tags:
+        - Sessions
+      summary: Get session details
+      operationId: zypi_session_get
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Session ID
+      responses:
+        '200':
+          description: Session details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '404':
+          description: Session not found
+
+    delete:
+      tags:
+        - Sessions
+      summary: Close a session (stop the VM)
+      operationId: zypi_session_close
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Session closed
+
+  /sessions/{id}/exec:
+    post:
+      tags:
+        - Sessions
+      summary: Execute a command in an existing session
+      description: |
+        Runs a command inside an already-running Firecracker VM session.
+        Much faster than one-shot exec for multi-step workflows.
+
+        Set `stream: true` for SSE streaming.
+      operationId: zypi_session_exec
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Session ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionExecRequest'
+      responses:
+        '200':
+          description: Command executed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionExecResponse'
+        '400':
+          description: Invalid request
+        '404':
+          description: Session not found
+        '410':
+          description: Session closed
+
+  # ── Pool / Image Warm ──────────────────────────────────────────
+  /images/{ref}/warm:
+    post:
+      tags:
+        - Pool
+      summary: Pre-warm VMs for an image
+      description: |
+        Boots Firecracker VMs in the background for the given image.
+        Subsequent /exec calls with matching image will be sub-millisecond.
+      operationId: zypi_image_warm
+      parameters:
+        - name: ref
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Image reference
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WarmRequest'
+      responses:
+        '202':
+          description: Warming started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  image:
+                    type: string
+                  requested:
+                    type: integer
+                  message:
+                    type: string
+
+  /images/{ref}/warm-status:
+    get:
+      tags:
+        - Pool
+      summary: Check warm VM count for an image
+      operationId: zypi_image_warm_status
+      parameters:
+        - name: ref
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Warm status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WarmStatusResponse'
+
+  /pool/stats:
+    get:
+      tags:
+        - Pool
+      summary: Get VM pool statistics
+      operationId: zypi_pool_stats
+      responses:
+        '200':
+          description: Pool statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolStats'
+
+  # ── A2A Agent Discovery ────────────────────────────────────────
+  /.well-known/agent.json:
+    get:
+      tags:
+        - Discovery
+      summary: A2A Agent Card
+      description: |
+        Returns the Agent-to-Agent (A2A) Agent Card for Zypi.
+        Describes capabilities, endpoints, protocols, and authentication
+        for direct agent discovery and delegation.
+        Public endpoint (no auth required).
+      operationId: zypi_a2a_agent_card
+      responses:
+        '200':
+          description: Agent Card
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentCard'

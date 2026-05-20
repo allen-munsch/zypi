@@ -1,0 +1,66 @@
+services:
+  iron-proxy:
+    image: ironsh/iron-proxy:v0.21.0
+    container_name: zypi-iron-proxy
+    command: ["-config", "/etc/iron-proxy/config.yaml"]
+    volumes:
+      - ./config/iron-proxy/config.yaml:/etc/iron-proxy/config.yaml:ro
+      - iron-proxy-certs:/certs
+    ports:
+      - "8081:8080"     # HTTP proxy (host:8081, sandboxes use 10.0.0.2:8080)
+      - "8443:8443"     # HTTPS proxy (sni-only passthrough)
+      - "5353:5353/udp" # DNS
+    networks:
+      zypi_net:
+        ipv4_address: 10.0.0.2  # Fixed IP so VMs can reach it
+    restart: unless-stopped
+
+  zypi-node:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zypi:latest
+    container_name: zypi-node
+    cgroup: host
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    devices:
+      - /dev/kvm:/dev/kvm
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - ./.zypi/registry:/mnt/zypi-registry
+      - ./.zypi/data:/var/lib/zypi
+      # OverlayBD mounts:
+      - ./.zypi/overlaybd:/mnt/zypi-overlaybd
+      - ./.zypi/overlaybd/images:/var/lib/overlaybd
+      # Replace internal config with yours
+      - ./config/overlaybd.json:/etc/overlaybd/overlaybd.json:ro
+      # (Optional, but recommended)
+      - /dev:/dev
+      # mount elixir source code
+      - ./lib:/app/lib
+      - ./config:/app/config
+    environment:
+      - ZYPI_DATA_DIR=/var/lib/zypi
+      - ZYPI_KERNEL_PATH=/opt/zypi/kernel/vmlinux
+      - ZYPI_LOG_LEVEL=debug
+      - MIX_ENV=dev
+    ports:
+      - "4000:4000"   # API
+      - "4001:4001"   # Console socket
+    networks:
+      - zypi_net
+
+volumes:
+  iron-proxy-certs:
+
+networks:
+  zypi_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.0.0/24
+          gateway: 10.0.0.1

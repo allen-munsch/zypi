@@ -1,0 +1,69 @@
+# iron-proxy configuration for Zypi sandbox egress firewall
+#
+# Default-deny MITM proxy: sandboxes can only reach allowlisted domains.
+# Proxy tokens swapped for real secrets at the boundary.
+
+dns:
+  listen: ":5353"
+  proxy_ip: "10.0.0.2"
+  upstream_resolver: "8.8.8.8:53"
+
+proxy:
+  http_listen: ":8080"
+  https_listen: ":8443"
+  # Deny cloud metadata endpoints and internal networks
+  upstream_deny_cidrs:
+    - "169.254.169.254/32"
+    - "10.0.0.0/8"
+    - "127.0.0.0/8"
+    - "::1/128"
+
+# TLS — sni-only mode (no CA required, TCP passthrough for HTTPS)
+# For full MITM with secret injection, generate CA certs and use mode: mitm
+tls:
+  mode: "sni-only"
+
+metrics:
+  listen: ":9091"
+
+transforms:
+  # Default-deny allowlist — only these domains can be reached
+  - name: allowlist
+    config:
+      domains:
+        # Package registries
+        - "pypi.org"
+        - "files.pythonhosted.org"
+        - "registry.npmjs.org"
+        - "crates.io"
+        - "static.crates.io"
+        - "github.com"
+        - "api.github.com"
+        - "objects.githubusercontent.com"
+        # AI/LLM APIs
+        - "api.openai.com"
+        - "api.anthropic.com"
+        - "api.mistral.ai"
+        - "generativelanguage.googleapis.com"
+        # Testing
+        - "httpbin.org"
+        - "ifconfig.me"
+        - "ident.me"
+      cidrs:
+        - "10.0.0.0/24"
+
+  # Secret injection — sandboxes use proxy tokens, iron-proxy swaps real creds
+  # - name: secrets
+  #   config:
+  #     secrets:
+  #       - source:
+  #           type: env
+  #           var: OPENAI_API_KEY
+  #         proxy_value: "proxy-token-openai"
+  #         match_headers: ["Authorization"]
+  #         match_body: false
+  #         rules:
+  #           - host: "api.openai.com"
+
+log:
+  level: "info"

@@ -1,0 +1,6 @@
+.zypi/
+_build/
+accelerated-container-image/
+context/
+deps/
+erl_crash.dump

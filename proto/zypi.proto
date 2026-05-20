@@ -1,0 +1,290 @@
+syntax = "proto3";
+
+package zypi.v1;
+
+// ── Zypi Sandbox Execution Service ─────────────────────────────────────────
+//
+// gRPC service for typed Firecracker microVM sandbox operations.
+// Runs on port 4001. REST API remains on port 4000 for backward compat.
+//
+// This is the canonical, typed interface that FlowEngine, Weft, and YAS-MCP
+// call instead of hand-rolling JSON payloads with guessable field names.
+
+service ZypiService {
+  // One-shot sandbox execution — boots a Firecracker microVM, runs command,
+  // captures output, destroys VM. Sub-second boot via CoW rootfs.
+  rpc Execute(SandboxExecRequest) returns (SandboxExecResponse);
+
+  // Create a long-lived sandbox session. VM stays alive for multi-step workflows.
+  // Auto-expires after 5 minutes of idle time.
+  rpc CreateSession(CreateSessionRequest) returns (SessionResponse);
+
+  // Execute a command in an existing session sandbox.
+  // Much faster than one-shot Execute for multi-step workflows.
+  rpc SessionExec(SessionExecRequest) returns (SandboxExecResponse);
+
+  // Get session details.
+  rpc GetSession(GetSessionRequest) returns (SessionResponse);
+
+  // List all active sessions.
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+
+  // Close a session and stop the VM.
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+
+  // Get session statistics.
+  rpc SessionStats(SessionStatsRequest) returns (SessionStatsResponse);
+
+  // List available images.
+  rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+
+  // Get image import status.
+  rpc ImageStatus(ImageStatusRequest) returns (ImageStatusResponse);
+
+  // Pre-warm VMs for an image. Subsequent Execute calls with matching image
+  // will be sub-millisecond.
+  rpc WarmImage(WarmImageRequest) returns (WarmImageResponse);
+
+  // Get warm VM status for an image.
+  rpc WarmStatus(WarmStatusRequest) returns (WarmStatusResponse);
+
+  // Get VM pool statistics — total, warm, active, per-image breakdown.
+  rpc PoolStatus(PoolStatusRequest) returns (PoolStatusResponse);
+
+  // Health check.
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+// ── Messages ───────────────────────────────────────────────────────────────
+
+// ── One-Shot Execute ──────────────────────────────────────────────────────
+
+message SandboxExecRequest {
+  // The command to execute. First element is the executable, rest are args.
+  // e.g. ["/bin/sh", "-c", "echo hello"]
+  repeated string command = 1;
+
+  // OCI image to use. Default: "ubuntu:24.04"
+  string image = 2;
+
+  // Timeout in seconds. Default: 60.
+  uint32 timeout_secs = 3;
+
+  // Memory limit in MB. Default: 256.
+  optional uint32 memory_mb = 4;
+
+  // vCPU count. Default: 1.
+  optional uint32 vcpus = 5;
+
+  // Environment variables injected into the sandbox.
+  map<string, string> env = 6;
+
+  // Working directory inside the sandbox.
+  optional string workdir = 7;
+
+  // Files to inject (path -> content). Write-on-boot, read-only after.
+  map<string, string> files = 8;
+
+  // Agent ID for attribution and memory tracking.
+  optional string agent_id = 9;
+
+  // Enable SSE-equivalent streaming (server-side streaming of stdout/stderr).
+  // When true, the server streams output as it arrives rather than buffering.
+  bool stream = 10;
+}
+
+message SandboxExecResponse {
+  // Captured stdout.
+  string stdout = 1;
+
+  // Captured stderr.
+  string stderr = 2;
+
+  // Process exit code. 0 = success.
+  int32 exit_code = 3;
+
+  // Wall-clock execution time in milliseconds.
+  uint64 duration_ms = 4;
+
+  // Sandbox container ID for debugging.
+  string sandbox_id = 5;
+
+  // Whether the command timed out.
+  bool timed_out = 6;
+}
+
+// ── Sessions ───────────────────────────────────────────────────────────────
+
+message CreateSessionRequest {
+  // Agent ID for attribution.
+  optional string agent_id = 1;
+
+  // OCI image. Default: "ubuntu:24.04"
+  string image = 2;
+
+  // vCPU count. Default: 1.
+  optional uint32 vcpus = 3;
+
+  // Memory limit in MB. Default: 256.
+  optional uint32 memory_mb = 4;
+
+  // Arbitrary metadata.
+  map<string, string> metadata = 5;
+}
+
+message SessionResponse {
+  // Session ID (use with SessionExec).
+  string session_id = 1;
+
+  // Underlying sandbox container ID.
+  string container_id = 2;
+
+  // Internal IP of the sandbox VM.
+  string ip = 3;
+
+  // OCI image in use.
+  string image = 4;
+
+  // Agent ID (if provided).
+  string agent_id = 5;
+
+  // Session status: running, closed, expired.
+  string status = 6;
+
+  // ISO8601 creation timestamp.
+  string created_at = 7;
+}
+
+message SessionExecRequest {
+  // Session ID from CreateSession.
+  string session_id = 1;
+
+  // Command to execute.
+  repeated string command = 2;
+
+  // Timeout in seconds. Default: 30.
+  optional uint32 timeout_secs = 3;
+
+  // Environment variables.
+  map<string, string> env = 4;
+
+  // Working directory.
+  optional string workdir = 5;
+
+  // Enable streaming of stdout/stderr.
+  bool stream = 6;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+}
+
+message ListSessionsRequest {
+  // Optional: filter by agent_id.
+  optional string agent_id = 1;
+}
+
+message ListSessionsResponse {
+  repeated SessionResponse sessions = 1;
+  uint32 count = 2;
+}
+
+message CloseSessionRequest {
+  string session_id = 1;
+}
+
+message CloseSessionResponse {
+  string status = 1;  // "closed"
+}
+
+message SessionStatsRequest {
+  // intentionally empty
+}
+
+message SessionStatsResponse {
+  uint32 total = 1;
+  uint32 running = 2;
+  uint32 closed = 3;
+  uint32 expired = 4;
+}
+
+// ── Images ─────────────────────────────────────────────────────────────────
+
+message ListImagesRequest {
+  // intentionally empty
+}
+
+message ImageInfo {
+  string ref = 1;
+  string status = 2;   // queued, importing, ready, failed
+  uint32 progress = 3;
+  string current_step = 4;
+  uint32 total_layers = 5;
+  uint32 applied_layers = 6;
+  uint64 size_bytes = 7;
+  string error_message = 8;
+  string started_at = 9;
+  string completed_at = 10;
+}
+
+message ListImagesResponse {
+  repeated ImageInfo images = 1;
+}
+
+message ImageStatusRequest {
+  string ref = 1;
+}
+
+message ImageStatusResponse {
+  ImageInfo image = 1;
+}
+
+// ── Pool / Image Warm ──────────────────────────────────────────────────────
+
+message WarmImageRequest {
+  // Image reference, e.g. "ubuntu:24.04"
+  string ref = 1;
+
+  // Number of VMs to pre-warm. Max: 10.
+  uint32 count = 2;
+}
+
+message WarmImageResponse {
+  string status = 1;    // "warming"
+  string image = 2;
+  uint32 requested = 3;
+  string message = 4;
+}
+
+message WarmStatusRequest {
+  string ref = 1;
+}
+
+message WarmStatusResponse {
+  string image = 1;
+  uint32 warm_vms = 2;
+}
+
+// ── Pool ───────────────────────────────────────────────────────────────────
+
+message PoolStatusRequest {
+  // intentionally empty
+}
+
+message PoolStatusResponse {
+  uint32 total_vms = 1;
+  uint32 warm_vms = 2;
+  uint32 active_vms = 3;
+  map<string, uint32> by_image = 4;
+}
+
+// ── Health ─────────────────────────────────────────────────────────────────
+
+message HealthRequest {
+  // intentionally empty
+}
+
+message HealthResponse {
+  string status = 1;     // "ok"
+  string timestamp = 2;  // ISO8601
+}

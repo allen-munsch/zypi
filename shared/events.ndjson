@@ -1,0 +1,6 @@
+{"ts":"2026-05-12T07:30:31.500925010Z","agent":"zypi","event":"committed","task":"remove protox hex dep","commit":"66faa13e61dc0ee0bcb1758db2330a3abf216fec","msg":"Replace protox with vendored 300-line stubs"}
+{"ts":"2026-05-12T07:30:31.509634939Z","agent":"zypi","event":"committed","task":"bundle openapi.yaml for Docker","commit":"bfed3336b379f8651a60708b96fb36e755c28115","msg":"Copy openapi.yaml to priv/, add COPY priv to Dockerfile"}
+{"ts":"2026-05-12T07:30:31.518295181Z","agent":"zypi","event":"committed","task":"fix ConsoleSocket/gRPC port conflict","commit":"50dcdde8b5a23a0a3e4864a34e5bbdb3c47f4fc4","msg":"ConsoleSocket port 4001->4002, docker-compose expose 4002"}
+{"ts":"2026-05-12T07:30:31.524922006Z","agent":"zypi","event":"completed","task":"container rebuilt, all endpoints live","commit":"50dcdde8b5a23a0a3e4864a34e5bbdb3c47f4fc4","msg":"agent card 200, openapi.yaml 200, health OK, gRPC live on :4001"}
+{"ts":"2026-05-12T07:30:31.528712830Z","agent":"zypi","event":"note","msg":"v4 convention adopted — using belt binary for all communication"}
+{"ts":"2026-05-12T07:52:12.114060241Z","agent":"zypi","event":"note","msg":"belt v0.1.1 pulled (0d02d60), rebuilt with --features full"}

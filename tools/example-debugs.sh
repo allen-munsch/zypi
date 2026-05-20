@@ -1,0 +1,1 @@
+docker compose exec zypi-node bash -c "mkdir -p /tmp/vm_check && mount -o loop /var/lib/zypi/containers/test2/rootfs.ext4 /tmp/vm_check && find /tmp/vm_check -name sshd -o -name 'sshd*' && umount /tmp/vm_check"
